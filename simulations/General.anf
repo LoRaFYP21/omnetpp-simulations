@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scave:Analysis xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:scave="http://www.omnetpp.org/omnetpp/scave">
+  <inputs>
+    <inputs name="/floramoto/simulations/results/General-*.vec"/>
+    <inputs name="/floramoto/simulations/results/General-*.sca"/>
+  </inputs>
+  <datasets>
+    <datasets name="AllNodes => numReceived">
+      <items xsi:type="scave:Add" filterPattern="run(*) AND module(*) AND name(numReceived)"/>
+      <items xsi:type="scave:BarChart" name="AllNodes => numReceived"/>
+    </datasets>
+  </datasets>
+  <chartSheets>
+    <chartSheets name="default" charts="//@datasets/@datasets.0/@items.1"/>
+  </chartSheets>
+</scave:Analysis>

@@ -1,0 +1,460 @@
+version 2
+run General-0-20240131-08:57:39-24852
+attr configname General
+attr datetime 20240131-08:57:39
+attr experiment General
+attr inifile LoRaMesh.ini
+attr iterationvars "$numberOfNodes=4, $timeToNextDataPacketMax=0.0000s, $enforceDutyCycle=true"
+attr iterationvarsf numberOfNodes=4,timeToNextDataPacketMax=0.0000s,enforceDutyCycle=true-
+attr measurement "$numberOfNodes=4, $timeToNextDataPacketMax=0.0000s, $enforceDutyCycle=true"
+attr network LoRaMesh
+attr processid 24852
+attr repetition 0
+attr replication #0
+attr resultdir results
+attr runnumber 0
+attr seedset 0
+itervar enforceDutyCycle true
+itervar numberOfNodes 4
+itervar timeToNextDataPacketMax 0.0000s
+param **.loRaNodes[*].**.stopRoutingAfterDataDone 7200s
+param **.loRaNodes[0].initialX 2100m
+param **.loRaNodes[0].initialY 1600m
+param **.loRaNodes[1].initialX 1700m
+param **.loRaNodes[1].initialY 1600m
+param **.loRaNodes[2].initialX 1100m
+param **.loRaNodes[2].initialY 1800m
+param **.loRaNodes[3].initialX 400m
+param **.loRaNodes[3].initialY 400m
+param **.loRaNodes[*].LoRaNic.radio.energyConsumerType "\"LoRaEnergyConsumer\""
+param **.loRaNodes[*].**.energySourceModule "\"IdealEpEnergyStorage\""
+param **.loRaNodes[*].LoRaNic.radio.energyConsumer.configFile "xmldoc(\"energyConsumptionParameters.xml\")"
+param **.constraintAreaMinX 0m
+param **.constraintAreaMinY 0m
+param **.constraintAreaMinZ 0m
+param **.constraintAreaMaxX 3050m
+param **.constraintAreaMaxY 3050m
+param **.constraintAreaMaxZ 0m
+param **.delayer.config "xmldoc(\"cloudDelays.xml\")"
+param **.radio.radioMediumModule "\"LoRaMedium\""
+param **.LoRaMedium.pathLossType "\"LoRaLogNormalShadowing\""
+param **.sigma 0
+param **.minInterferenceTime 0s
+param **.numberOfGateways 0
+param **.numberOfNodes 4
+param **.sendPacketsContinuously false
+param **.onlyNode0SendsPackets true
+param **.numberOfDestinationsPerNode 3
+param **.dataPacketDefaultSize 20B
+param **.packetTTL 0
+param **.timeToFirstDataPacket 3600s
+param **.timeToNextDataPacketDist "\"uniform\""
+param **.timeToNextDataPacketMin 0s
+param **.timeToNextDataPacketMax 0.0000s
+param **.timeToNextDataPacketAvg 2s
+param **.numberOfPacketsToForward 3
+param **.ownDataPriority 0
+param **.routingMetric 2
+param **.routeDiscovery true
+param **.routeTimeout 300s
+param **.storeBestRouteOnly false
+param **.getRoutesFromDataPackets true
+param **.routingPacketPriority 0.5
+param **.routingPacketMaxSize 12B
+param **.timeToFirstRoutingPacket "1800s+uniform(0s, 120s)"
+param **.timeToNextRoutingPacketDist "\"uniform\""
+param **.timeToNextRoutingPacketMin 0s
+param **.timeToNextRoutingPacketMax 120s
+param **.timeToNextRoutingPacketAvg 60s
+param **.dutyCycle 0.01
+param **.enforceDutyCycle true
+param **.loRaNodes[*].**.initFromDisplayString false
+param **.loRaNodes[*].**initialLoRaSF 12
+param **.loRaNodes[*].**minLoRaSF 7
+param **.loRaNodes[*].**maxLoRaSF 12
+param **.loRaNodes[*].**initialLoRaBW "125 kHz"
+param **.loRaNodes[*].**initialLoRaCR 1
+param **.loRaNodes[*].**initialLoRaTP 20dBm
+param **.loRaNodes[*].**initialLoRaCAD true
+param **.loRaNodes[*].**initialLoRaCADatt 0dB
+param **.routingMetric 2
+param **.loRaNodes[*].minX 0m
+param **.loRaNodes[*].minY 0m
+param **.loRaNodes[*].maxX 1000m
+param **.loRaNodes[*].maxY 1000m
+
+vector 0 LoRaMesh.loRaNodes[0].LoRaNodeApp "Tx SF Vector" ETV
+vector 1 LoRaMesh.loRaNodes[0].LoRaNodeApp "Tx TP Vector" ETV
+vector 2 LoRaMesh.loRaNodes[0].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+vector 3 LoRaMesh.loRaNodes[0].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 4 LoRaMesh.loRaNodes[0].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+vector 5 LoRaMesh.loRaNodes[0].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 6 LoRaMesh.loRaNodes[0].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+vector 7 LoRaMesh.loRaNodes[0].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+vector 8 LoRaMesh.loRaNodes[1].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+vector 9 LoRaMesh.loRaNodes[1].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 10 LoRaMesh.loRaNodes[1].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+vector 11 LoRaMesh.loRaNodes[1].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 12 LoRaMesh.loRaNodes[2].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+vector 13 LoRaMesh.loRaNodes[2].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 14 LoRaMesh.loRaNodes[2].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+vector 15 LoRaMesh.loRaNodes[2].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 16 LoRaMesh.loRaNodes[3].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+vector 17 LoRaMesh.loRaNodes[3].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 18 LoRaMesh.loRaNodes[3].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+vector 19 LoRaMesh.loRaNodes[3].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+vector 20 LoRaMesh.loRaNodes[1].LoRaNodeApp "Tx SF Vector" ETV
+vector 21 LoRaMesh.loRaNodes[1].LoRaNodeApp "Tx TP Vector" ETV
+vector 22 LoRaMesh.loRaNodes[1].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+vector 23 LoRaMesh.loRaNodes[1].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+vector 24 LoRaMesh.loRaNodes[2].LoRaNodeApp "Tx SF Vector" ETV
+vector 25 LoRaMesh.loRaNodes[2].LoRaNodeApp "Tx TP Vector" ETV
+vector 26 LoRaMesh.loRaNodes[2].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+vector 27 LoRaMesh.loRaNodes[2].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+0	6	3600	12
+0	57	3758.1056000001	12
+1	6	3600	20
+1	57	3758.1056000001	20
+2	7	3600	3
+2	12	3601.581056	2
+2	58	3758.1056000001	3
+2	63	3759.6866560001	2
+3	7	3600	0
+3	7	3600	0
+3	7	3600	3.3e-007
+3	8	3600	0
+3	8	3600	0
+3	12	3601.581056	0
+3	12	3601.581056	0.03201
+3	12	3601.581056	0.03201
+3	12	3601.581056	0.03201
+3	12	3601.581056	0.03201
+3	23	3601.58105866862	0
+3	23	3601.58105866862	0.03201
+3	42	3603.16211466862	0.03201
+3	42	3603.16211466862	0.03201
+3	58	3758.1056000001	0
+3	58	3758.1056000001	0
+3	58	3758.1056000001	3.3e-007
+3	59	3758.1056000001	0
+3	59	3758.1056000001	0
+3	63	3759.6866560001	0
+3	63	3759.6866560001	0.03201
+3	63	3759.6866560001	0.03201
+3	63	3759.6866560001	0.03201
+3	63	3759.6866560001	0.03201
+3	74	3759.68665866872	0
+3	74	3759.68665866872	0.03201
+3	89	3761.26771466872	0.03201
+3	89	3761.26771466872	0.03201
+4	7	3600	nan
+4	12	3601.581056	nan
+4	23	3601.58105866862	nan
+4	42	3603.16211466862	nan
+4	58	3758.1056000001	nan
+4	63	3759.6866560001	nan
+4	74	3759.68665866872	nan
+4	89	3761.26771466872	nan
+5	7	3600	0
+5	7	3600	0
+5	7	3600	3.3e-007
+5	8	3600	0
+5	8	3600	0
+5	12	3601.581056	0
+5	12	3601.581056	0.03201
+5	12	3601.581056	0.03201
+5	12	3601.581056	0.03201
+5	12	3601.581056	0.03201
+5	23	3601.58105866862	0
+5	23	3601.58105866862	0.03201
+5	42	3603.16211466862	0.03201
+5	42	3603.16211466862	0.03201
+5	58	3758.1056000001	0
+5	58	3758.1056000001	0
+5	58	3758.1056000001	3.3e-007
+5	59	3758.1056000001	0
+5	59	3758.1056000001	0
+5	63	3759.6866560001	0
+5	63	3759.6866560001	0.03201
+5	63	3759.6866560001	0.03201
+5	63	3759.6866560001	0.03201
+5	63	3759.6866560001	0.03201
+5	74	3759.68665866872	0
+5	74	3759.68665866872	0.03201
+5	89	3761.26771466872	0.03201
+5	89	3761.26771466872	0.03201
+6	7	3600	0
+6	12	3601.581056	2
+6	23	3601.58105866862	3
+6	42	3603.16211466862	2
+6	58	3758.1056000001	0
+6	63	3759.6866560001	2
+6	74	3759.68665866872	3
+6	89	3761.26771466872	2
+7	7	3600	1
+7	8	3600	2
+7	12	3601.581056	1
+7	12	3601.581056	0
+7	58	3758.1056000001	1
+7	59	3758.1056000001	2
+7	63	3759.6866560001	1
+7	63	3759.6866560001	0
+8	9	3600.00000133426	3
+8	17	3601.58105733426	2
+8	21	3601.58105733436	0
+8	37	3603.16211333436	2
+8	60	3758.10560133436	3
+8	68	3759.68665733436	2
+8	72	3759.68665733446	0
+8	84	3761.26771333446	2
+9	9	3600.00000133426	0
+9	9	3600.00000133426	0.03201
+9	17	3601.58105733426	0.03201
+9	17	3601.58105733426	0.03201
+9	21	3601.58105733436	0
+9	21	3601.58105733436	0
+9	21	3601.58105733436	3.3e-007
+9	22	3601.58105733436	0
+9	22	3601.58105733436	0
+9	37	3603.16211333436	0
+9	37	3603.16211333436	0.03201
+9	37	3603.16211333436	0.03201
+9	37	3603.16211333436	0.03201
+9	37	3603.16211333436	0.03201
+9	60	3758.10560133436	0
+9	60	3758.10560133436	0.03201
+9	68	3759.68665733436	0.03201
+9	68	3759.68665733436	0.03201
+9	72	3759.68665733446	0
+9	72	3759.68665733446	0
+9	72	3759.68665733446	3.3e-007
+9	73	3759.68665733446	0
+9	73	3759.68665733446	0
+9	84	3761.26771333446	0
+9	84	3761.26771333446	0.03201
+9	84	3761.26771333446	0.03201
+9	84	3761.26771333446	0.03201
+9	84	3761.26771333446	0.03201
+10	9	3600.00000133426	nan
+10	17	3601.58105733426	nan
+10	21	3601.58105733436	nan
+10	37	3603.16211333436	nan
+10	60	3758.10560133436	nan
+10	68	3759.68665733436	nan
+10	72	3759.68665733446	nan
+10	84	3761.26771333446	nan
+11	9	3600.00000133426	0
+11	9	3600.00000133426	0.03201
+11	17	3601.58105733426	0.03201
+11	17	3601.58105733426	0.03201
+11	21	3601.58105733436	0
+11	21	3601.58105733436	0
+11	21	3601.58105733436	3.3e-007
+11	22	3601.58105733436	0
+11	22	3601.58105733436	0
+11	37	3603.16211333436	0
+11	37	3603.16211333436	0.03201
+11	37	3603.16211333436	0.03201
+11	37	3603.16211333436	0.03201
+11	37	3603.16211333436	0.03201
+11	60	3758.10560133436	0
+11	60	3758.10560133436	0.03201
+11	68	3759.68665733436	0.03201
+11	68	3759.68665733436	0.03201
+11	72	3759.68665733446	0
+11	72	3759.68665733446	0
+11	72	3759.68665733446	3.3e-007
+11	73	3759.68665733446	0
+11	73	3759.68665733446	0
+11	84	3761.26771333446	0
+11	84	3761.26771333446	0.03201
+11	84	3761.26771333446	0.03201
+11	84	3761.26771333446	0.03201
+11	84	3761.26771333446	0.03201
+12	10	3600.0000034017	3
+12	24	3601.5810594017	2
+12	28	3601.5810594018	0
+12	45	3603.1621154018	2
+12	61	3758.1056034018	3
+12	75	3759.6866594018	2
+12	79	3759.6866594441	3
+12	92	3761.2677154441	2
+13	10	3600.0000034017	0
+13	10	3600.0000034017	0.03201
+13	24	3601.5810594017	0.03201
+13	24	3601.5810594017	0.03201
+13	28	3601.5810594018	0
+13	28	3601.5810594018	0
+13	28	3601.5810594018	3.3e-007
+13	29	3601.5810594018	0
+13	29	3601.5810594018	0
+13	45	3603.1621154018	0
+13	45	3603.1621154018	0.03201
+13	45	3603.1621154018	0.03201
+13	45	3603.1621154018	0.03201
+13	45	3603.1621154018	0.03201
+13	61	3758.1056034018	0
+13	61	3758.1056034018	0.03201
+13	75	3759.6866594018	0.03201
+13	75	3759.6866594018	0.03201
+13	79	3759.6866594441	0
+13	79	3759.6866594441	0.03201
+13	92	3761.2677154441	0.03201
+13	92	3761.2677154441	0.03201
+14	10	3600.0000034017	nan
+14	24	3601.5810594017	nan
+14	28	3601.5810594018	nan
+14	45	3603.1621154018	nan
+14	61	3758.1056034018	nan
+14	75	3759.6866594018	nan
+14	79	3759.6866594441	nan
+14	92	3761.2677154441	nan
+15	10	3600.0000034017	0
+15	10	3600.0000034017	0.03201
+15	24	3601.5810594017	0.03201
+15	24	3601.5810594017	0.03201
+15	28	3601.5810594018	0
+15	28	3601.5810594018	0
+15	28	3601.5810594018	3.3e-007
+15	29	3601.5810594018	0
+15	29	3601.5810594018	0
+15	45	3603.1621154018	0
+15	45	3603.1621154018	0.03201
+15	45	3603.1621154018	0.03201
+15	45	3603.1621154018	0.03201
+15	45	3603.1621154018	0.03201
+15	61	3758.1056034018	0
+15	61	3758.1056034018	0.03201
+15	75	3759.6866594018	0.03201
+15	75	3759.6866594018	0.03201
+15	79	3759.6866594441	0
+15	79	3759.6866594441	0.03201
+15	92	3761.2677154441	0.03201
+15	92	3761.2677154441	0.03201
+16	11	3600.00000694102	3
+16	33	3601.58106294102	2
+16	62	3758.10560694112	3
+16	80	3759.68666294112	2
+16	81	3759.68666323581	3
+16	95	3761.26771923581	2
+17	11	3600.00000694102	0
+17	11	3600.00000694102	0.03201
+17	33	3601.58106294102	0.03201
+17	33	3601.58106294102	0.03201
+17	62	3758.10560694112	0
+17	62	3758.10560694112	0.03201
+17	80	3759.68666294112	0.03201
+17	80	3759.68666294112	0.03201
+17	81	3759.68666323581	0
+17	81	3759.68666323581	0.03201
+17	95	3761.26771923581	0.03201
+17	95	3761.26771923581	0.03201
+18	11	3600.00000694102	nan
+18	33	3601.58106294102	nan
+18	62	3758.10560694112	nan
+18	80	3759.68666294112	nan
+18	81	3759.68666323581	nan
+18	95	3761.26771923581	nan
+19	11	3600.00000694102	0
+19	11	3600.00000694102	0.03201
+19	33	3601.58106294102	0.03201
+19	33	3601.58106294102	0.03201
+19	62	3758.10560694112	0
+19	62	3758.10560694112	0.03201
+19	80	3759.68666294112	0.03201
+19	80	3759.68666294112	0.03201
+19	81	3759.68666323581	0
+19	81	3759.68666323581	0.03201
+19	95	3761.26771923581	0.03201
+19	95	3761.26771923581	0.03201
+20	20	3601.58105733436	12
+20	71	3759.68665733446	12
+21	20	3601.58105733436	20
+21	71	3759.68665733446	20
+22	21	3601.58105733436	3
+22	37	3603.16211333436	2
+22	72	3759.68665733446	3
+22	84	3761.26771333446	2
+23	21	3601.58105733436	1
+23	22	3601.58105733436	2
+23	37	3603.16211333436	1
+23	37	3603.16211333436	0
+23	72	3759.68665733446	1
+23	73	3759.68665733446	2
+23	84	3761.26771333446	1
+23	84	3761.26771333446	0
+24	27	3601.5810594018	12
+25	27	3601.5810594018	20
+26	28	3601.5810594018	3
+26	45	3603.1621154018	2
+27	28	3601.5810594018	1
+27	29	3601.5810594018	2
+27	45	3603.1621154018	1
+27	45	3603.1621154018	0
+

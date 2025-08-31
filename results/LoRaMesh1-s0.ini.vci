@@ -1,0 +1,208 @@
+file 15554 1709748668                                           
+version 2
+run General-0-20240131-08:57:39-24852
+attr configname General
+attr datetime 20240131-08:57:39
+attr experiment General
+attr inifile LoRaMesh.ini
+attr iterationvars "$numberOfNodes=4, $timeToNextDataPacketMax=0.0000s, $enforceDutyCycle=true"
+attr iterationvarsf numberOfNodes=4,timeToNextDataPacketMax=0.0000s,enforceDutyCycle=true-
+attr measurement "$numberOfNodes=4, $timeToNextDataPacketMax=0.0000s, $enforceDutyCycle=true"
+attr network LoRaMesh
+attr processid 24852
+attr repetition 0
+attr replication #0
+attr resultdir results
+attr runnumber 0
+attr seedset 0
+itervar enforceDutyCycle true
+itervar numberOfNodes 4
+itervar timeToNextDataPacketMax 0.0000s
+param **.loRaNodes[*].**.stopRoutingAfterDataDone 7200s
+param **.loRaNodes[0].initialX 2100m
+param **.loRaNodes[0].initialY 1600m
+param **.loRaNodes[1].initialX 1700m
+param **.loRaNodes[1].initialY 1600m
+param **.loRaNodes[2].initialX 1100m
+param **.loRaNodes[2].initialY 1800m
+param **.loRaNodes[3].initialX 400m
+param **.loRaNodes[3].initialY 400m
+param **.loRaNodes[*].LoRaNic.radio.energyConsumerType "\"LoRaEnergyConsumer\""
+param **.loRaNodes[*].**.energySourceModule "\"IdealEpEnergyStorage\""
+param **.loRaNodes[*].LoRaNic.radio.energyConsumer.configFile "xmldoc(\"energyConsumptionParameters.xml\")"
+param **.constraintAreaMinX 0m
+param **.constraintAreaMinY 0m
+param **.constraintAreaMinZ 0m
+param **.constraintAreaMaxX 3050m
+param **.constraintAreaMaxY 3050m
+param **.constraintAreaMaxZ 0m
+param **.delayer.config "xmldoc(\"cloudDelays.xml\")"
+param **.radio.radioMediumModule "\"LoRaMedium\""
+param **.LoRaMedium.pathLossType "\"LoRaLogNormalShadowing\""
+param **.sigma 0
+param **.minInterferenceTime 0s
+param **.numberOfGateways 0
+param **.numberOfNodes 4
+param **.sendPacketsContinuously false
+param **.onlyNode0SendsPackets true
+param **.numberOfDestinationsPerNode 3
+param **.dataPacketDefaultSize 20B
+param **.packetTTL 0
+param **.timeToFirstDataPacket 3600s
+param **.timeToNextDataPacketDist "\"uniform\""
+param **.timeToNextDataPacketMin 0s
+param **.timeToNextDataPacketMax 0.0000s
+param **.timeToNextDataPacketAvg 2s
+param **.numberOfPacketsToForward 3
+param **.ownDataPriority 0
+param **.routingMetric 2
+param **.routeDiscovery true
+param **.routeTimeout 300s
+param **.storeBestRouteOnly false
+param **.getRoutesFromDataPackets true
+param **.routingPacketPriority 0.5
+param **.routingPacketMaxSize 12B
+param **.timeToFirstRoutingPacket "1800s+uniform(0s, 120s)"
+param **.timeToNextRoutingPacketDist "\"uniform\""
+param **.timeToNextRoutingPacketMin 0s
+param **.timeToNextRoutingPacketMax 120s
+param **.timeToNextRoutingPacketAvg 60s
+param **.dutyCycle 0.01
+param **.enforceDutyCycle true
+param **.loRaNodes[*].**.initFromDisplayString false
+param **.loRaNodes[*].**initialLoRaSF 12
+param **.loRaNodes[*].**minLoRaSF 7
+param **.loRaNodes[*].**maxLoRaSF 12
+param **.loRaNodes[*].**initialLoRaBW "125 kHz"
+param **.loRaNodes[*].**initialLoRaCR 1
+param **.loRaNodes[*].**initialLoRaTP 20dBm
+param **.loRaNodes[*].**initialLoRaCAD true
+param **.loRaNodes[*].**initialLoRaCADatt 0dB
+param **.routingMetric 2
+param **.loRaNodes[*].minX 0m
+param **.loRaNodes[*].minY 0m
+param **.loRaNodes[*].maxX 1000m
+param **.loRaNodes[*].maxY 1000m
+
+vector 0 LoRaMesh.loRaNodes[0].LoRaNodeApp "Tx SF Vector" ETV
+0	8058 38 6 57 3600 3758.1056000001 2 12 12 24 288
+vector 1 LoRaMesh.loRaNodes[0].LoRaNodeApp "Tx TP Vector" ETV
+1	8096 38 6 57 3600 3758.1056000001 2 20 20 40 800
+vector 2 LoRaMesh.loRaNodes[0].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+2	8134 80 7 63 3600 3759.6866560001 4 2 3 10 26
+vector 3 LoRaMesh.loRaNodes[0].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+3	8214 698 7 89 3600 3761.26771466872 28 0 0.03201 0.44814066 0.014344961400218
+vector 4 LoRaMesh.loRaNodes[0].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+4	8912 196 7 89 3600 3761.26771466872 8 nan nan nan nan
+vector 5 LoRaMesh.loRaNodes[0].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+5	9108 698 7 89 3600 3761.26771466872 28 0 0.03201 0.44814066 0.014344961400218
+vector 6 LoRaMesh.loRaNodes[0].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+6	9806 180 7 89 3600 3761.26771466872 8 0 3 14 34
+vector 7 LoRaMesh.loRaNodes[0].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+7	9986 160 7 63 3600 3759.6866560001 8 0 2 8 12
+vector 8 LoRaMesh.loRaNodes[1].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+8	10146 199 9 84 3600.00000133426 3761.26771333446 8 0 3 14 34
+vector 9 LoRaMesh.loRaNodes[1].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+9	10345 796 9 84 3600.00000133426 3761.26771333446 28 0 0.03201 0.44814066 0.014344961400218
+vector 10 LoRaMesh.loRaNodes[1].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+10	11141 223 9 84 3600.00000133426 3761.26771333446 8 nan nan nan nan
+vector 11 LoRaMesh.loRaNodes[1].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+11	11364 824 9 84 3600.00000133426 3761.26771333446 28 0 0.03201 0.44814066 0.014344961400218
+vector 12 LoRaMesh.loRaNodes[2].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+12	12188 200 10 92 3600.0000034017 3761.2677154441 8 0 3 17 43
+vector 13 LoRaMesh.loRaNodes[2].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+13	12388 635 10 92 3600.0000034017 3761.2677154441 22 0 0.03201 0.41613033 0.013320321300109
+vector 14 LoRaMesh.loRaNodes[2].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+14	13023 216 10 92 3600.0000034017 3761.2677154441 8 nan nan nan nan
+vector 15 LoRaMesh.loRaNodes[2].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+15	13239 635 10 92 3600.0000034017 3761.2677154441 22 0 0.03201 0.41613033 0.013320321300109
+vector 16 LoRaMesh.loRaNodes[3].LoRaNic.radio receptionState:vector ETV
+attr interpolationmode sample-hold
+attr source receptionStateChanged
+attr title "Radio reception state, vector"
+16	13874 156 11 95 3600.00000694102 3761.26771923581 6 2 3 15 39
+vector 17 LoRaMesh.loRaNodes[3].LoRaNic.radio.energyConsumer powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+17	14030 366 11 95 3600.00000694102 3761.26771923581 12 0 0.03201 0.28809 0.0092217609
+vector 18 LoRaMesh.loRaNodes[3].LoRaNic.radio.IdealEpEnergyStorage residualEnergyCapacity:vector ETV
+attr interpolationmode linear
+attr source residualEnergyCapacityChanged
+attr title "Residual energy capacity, vector"
+18	14396 168 11 95 3600.00000694102 3761.26771923581 6 nan nan nan nan
+vector 19 LoRaMesh.loRaNodes[3].LoRaNic.radio.IdealEpEnergyStorage powerConsumption:vector ETV
+attr interpolationmode sample-hold
+attr source powerConsumptionChanged
+attr title "Power consumption, vector"
+19	14564 366 11 95 3600.00000694102 3761.26771923581 12 0 0.03201 0.28809 0.0092217609
+vector 20 LoRaMesh.loRaNodes[1].LoRaNodeApp "Tx SF Vector" ETV
+20	14930 54 20 71 3601.58105733436 3759.68665733446 2 12 12 24 288
+vector 21 LoRaMesh.loRaNodes[1].LoRaNodeApp "Tx TP Vector" ETV
+21	14984 54 20 71 3601.58105733436 3759.68665733446 2 20 20 40 800
+vector 22 LoRaMesh.loRaNodes[1].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+22	15038 104 21 84 3601.58105733436 3761.26771333446 4 2 3 10 26
+vector 23 LoRaMesh.loRaNodes[1].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+23	15142 208 21 84 3601.58105733436 3761.26771333446 8 0 2 8 12
+vector 24 LoRaMesh.loRaNodes[2].LoRaNodeApp "Tx SF Vector" ETV
+24	15350 26 27 27 3601.5810594018 3601.5810594018 1 12 12 12 144
+vector 25 LoRaMesh.loRaNodes[2].LoRaNodeApp "Tx TP Vector" ETV
+25	15376 26 27 27 3601.5810594018 3601.5810594018 1 20 20 20 400
+vector 26 LoRaMesh.loRaNodes[2].LoRaNic.radio radioMode:vector ETV
+attr interpolationmode sample-hold
+attr source radioModeChanged
+attr title "Radio mode, vector"
+26	15402 50 28 45 3601.5810594018 3603.1621154018 2 2 3 5 13
+vector 27 LoRaMesh.loRaNodes[2].LoRaNic.radio transmissionState:vector ETV
+attr interpolationmode sample-hold
+attr source transmissionStateChanged
+attr title "Radio transmission state, vector"
+27	15452 102 28 45 3601.5810594018 3603.1621154018 4 0 2 4 6

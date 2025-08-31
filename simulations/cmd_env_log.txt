@@ -1,0 +1,14 @@
+
+Running configuration General, run #2...
+Scenario: $enforceDutyCycle=false, $repetition=0
+Assigned runID=General-2-20240228-16:16:34-3056
+Setting up network "LoRaMesh"...
+Initializing...
+
+Running simulation...
+** Event #0   t=0   Elapsed: 6e-006s (0m 00s)  0% completed  (0% total)
+     Speed:     ev/sec=0   simsec/sec=0   ev/simsec=0
+     Messages:  created: 335   present: 292   in FES: 8
+** Event #258048   t=36468.715842386   Elapsed: 2.00101s (0m 02s)  0% completed  (0% total)
+     Speed:     ev/sec=128960   simsec/sec=18225.3   ev/simsec=7.0759
+     Messages:  created: 6527   present: 314   in FES: 8
