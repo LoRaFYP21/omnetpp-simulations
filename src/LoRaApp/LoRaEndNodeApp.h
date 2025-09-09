@@ -126,6 +126,9 @@ class INET_API LoRaEndNodeApp : public cSimpleModule, public ILifecycle
         int deletedRoutes;
         int forwardBufferFull;
 
+        int maxAppPayloadBytes = 200; // default if INI doesn’t override
+
+
         simtime_t timeToFirstDataPacket;
         std::string timeToNextDataPacketDist;
         simtime_t timeToNextDataPacketMin;
