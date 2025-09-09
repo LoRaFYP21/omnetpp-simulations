@@ -84,6 +84,8 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+        int maxAppPayloadBytes @unit(B) = default(200B); // hard cap for app payloads
+        
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
