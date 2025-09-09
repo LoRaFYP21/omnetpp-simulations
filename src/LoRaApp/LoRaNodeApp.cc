@@ -1353,6 +1353,15 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 
         LoRaPacketsToSend.erase(LoRaPacketsToSend.begin());
 
+        const int maxAppPayloadBytes = par("maxAppPayloadBytes");
+        if (dataPacket->getByteLength() > maxAppPayloadBytes) {
+            EV_WARN << "Dropping oversize local (" << dataPacket->getByteLength()
+                    << "B > " << maxAppPayloadBytes << "B)\n";
+            delete dataPacket;
+            return 0; // nothing sent this tick
+        }
+
+
         transmit = true;
 
         sentDataPackets++;
@@ -1409,6 +1418,14 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 
                     // Erase the first packet in the forwarding buffer
                     LoRaPacketsToForward.erase(LoRaPacketsToForward.begin());
+
+                    const int maxAppPayloadBytes = par("maxAppPayloadBytes");
+                    if (dataPacket->getByteLength() > maxAppPayloadBytes) {
+                        EV_WARN << "Dropping oversize forward (" << dataPacket->getByteLength()
+                                << "B > " << maxAppPayloadBytes << "B)\n";
+                        continue; // try next packet in the queue
+                    }
+
 
                     // Redundantly check that the packet has not been forwarded in the mean time, which should never occur
                     if (!isPacketForwarded(dataPacket)) {
@@ -1573,6 +1590,14 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
                     // Erase the first packet in the forwarding buffer
                     LoRaPacketsToForward.erase(LoRaPacketsToForward.begin());
+
+                    const int maxAppPayloadBytes = par("maxAppPayloadBytes");
+                    if (forwardPacket->getByteLength() > maxAppPayloadBytes) {
+                        EV_WARN << "Dropping oversize forward (" << forwardPacket->getByteLength()
+                                << "B > " << maxAppPayloadBytes << "B)\n";
+                        continue; // try next packet in the queue
+                    }
+
 
                     // Redundantly check that the packet has not been forwarded in the mean time, which should never occur
                     if (!isPacketForwarded(forwardPacket)) {
@@ -1831,8 +1856,20 @@ void LoRaNodeApp::generateDataPackets() {
                 dataPacket->setVia(nodeId);
                 dataPacket->setDestination(destinations[j]);
                 dataPacket->getOptions().setAppACKReq(requestACKfromApp);
+
+
+                // Drop locals bigger than the configured cap
+                const int maxAppPayloadBytes = par("maxAppPayloadBytes");
+                if (dataPacketSize > maxAppPayloadBytes) {
+                    EV_WARN << "Skipping local packet (" << dataPacketSize
+                            << "B > " << maxAppPayloadBytes << "B)\n";
+                    delete dataPacket;
+                    continue; // next destination
+                }
+
                 dataPacket->setByteLength(dataPacketSize);
                 dataPacket->setDepartureTime(simTime());
+
 
                 switch (routingMetric) {
     //            case 0:
