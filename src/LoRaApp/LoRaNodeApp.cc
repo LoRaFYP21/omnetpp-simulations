@@ -473,6 +473,8 @@ void LoRaNodeApp::initialize(int stage) {
             }
         }
 
+
+
         dutyCycleEnd = simTime();
     }
 }
@@ -481,6 +483,16 @@ std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
     double radius, double centX, double centY) {
     nodeId = getContainingNode(this)->getIndex();
     routingMetric = par("routingMetric");
+
+    maxAppPayloadBytes = par("maxAppPayloadBytes");
+    if (maxAppPayloadBytes <= FRAG_HDR_SIZE)
+        throw cRuntimeError("maxAppPayloadBytes (%d) must be > FRAG_HDR_SIZE (%d)",
+                            maxAppPayloadBytes, FRAG_HDR_SIZE);
+
+    nextFragSeq = 0;
+    reassembledMessages = 0;
+    fragDrops = 0;
+
 
     if (nodeId == 0 && routingMetric == 0) // only for the end nodes and the packet originator
     {
@@ -530,6 +542,10 @@ void LoRaNodeApp::finish() {
     recordScalar("CordiX",coord.x);
     // DistanceY.record(coord.y);
     recordScalar("CordiY",coord.y);
+
+    recordScalar("reassembledMessages", reassembledMessages);
+    recordScalar("fragDrops", fragDrops);
+
 
 
     recordScalar("finalTP", loRaTP);
@@ -1266,11 +1282,18 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
 
     switch (packet->getMsgType()) {
     // DATA packet
-    case DATA:
-        //manageReceivedDataPacketForMe(packet);
+    case DATA: {
+        // deliver locally using a DUP (so we can still forward the original)
+        LoRaAppPacket *local = packet->dup();
+        if (local->getFrag()) handleFragmentForMe(local);
+        else { manageReceivedDataPacketForMe(local); delete local; }
+
+        // keep your mesh behavior: also forward the original
         std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
         manageReceivedDataPacketToForward(packet);
         break;
+    }
+
         // ACK packet
     case ACK:
         manageReceivedAckPacketForMe(packet);
@@ -1294,6 +1317,73 @@ void LoRaNodeApp::manageReceivedDataPacketForMe(cMessage *msg) {
         dataPacketsForMeUniqueLatency.collect(simTime()-packet->getDepartureTime());
     }
 }
+
+void LoRaNodeApp::handleFragmentForMe(LoRaAppPacket *pkt)
+{
+    // Non-fragmented (shouldn't happen here, but safe)
+    if (!pkt->getFrag()) {
+        manageReceivedDataPacketForMe(pkt);
+        delete pkt;
+        return;
+    }
+
+    FragKey key{pkt->getSource(), pkt->getFragSeq()};
+    auto &buf = reasm[key];
+
+    // First fragment we see for this (src, seq)?
+    if (buf.fragCount == 0) {
+        buf.totalLen  = pkt->getTotalLen();
+        buf.fragCount = pkt->getFragCount();
+        buf.present.assign(buf.fragCount, false);
+        buf.depTimes.assign(buf.fragCount, SIMTIME_ZERO);
+        buf.firstArrival = simTime();
+    }
+
+    int idx = pkt->getFragIndex();
+    if (idx < 0 || idx >= buf.fragCount) { fragDrops++; delete pkt; return; }
+
+    // duplicate fragment?
+    if (buf.present[idx]) { delete pkt; return; }
+
+    buf.present[idx] = true;
+    buf.depTimes[idx] = pkt->getDepartureTime();
+
+    // Complete?
+    bool done = true;
+    for (bool p : buf.present) { if (!p) { done = false; break; } }
+
+    if (done) {
+        // Use earliest fragment departure as "original" departure
+        simtime_t earliestDep = buf.depTimes[0];
+        for (int i = 1; i < buf.fragCount; ++i)
+            if (buf.depTimes[i] < earliestDep) earliestDep = buf.depTimes[i];
+
+        // Count receptions like an *entire* message was delivered
+        receivedDataPackets++;                // total receptions counter
+        receivedDataPacketsForMe++;          // per-dest receptions
+        receivedDataPacketsForMeUnique++;    // unique (whole-message) deliveries
+
+        dataPacketsForMeLatency.collect(simTime() - earliestDep);
+        dataPacketsForMeUniqueLatency.collect(simTime() - earliestDep);
+
+        reassembledMessages++;
+
+        // Insert a synthetic "full" packet into DataPacketsForMe for uniqueness tracking
+        LoRaAppPacket full("ReassembledData");
+        full.setMsgType(DATA);
+        full.setDataInt(pkt->getDataInt()); // any stable id is fine at this point
+        full.setSource(key.src);
+        full.setDestination(nodeId);
+        full.setByteLength(buf.totalLen);
+        full.setDepartureTime(earliestDep);
+        DataPacketsForMe.push_back(full);
+
+        reasm.erase(key);
+    }
+
+    delete pkt;
+}
+
 
 void LoRaNodeApp::manageReceivedAckPacketForMe(cMessage *msg) {
     receivedAckPackets++;
@@ -1848,40 +1938,51 @@ void LoRaNodeApp::generateDataPackets() {
 
         for (int k = 0; k < numberOfPacketsPerDestination; k++) {
             for (int j = 0; j < destinations.size(); j++) {
-                LoRaAppPacket *dataPacket = new LoRaAppPacket("DataPacket");
+                // --- Fragmenting generator ---
+                const int cap = maxAppPayloadBytes - FRAG_HDR_SIZE;
+                if (cap <= 0) throw cRuntimeError("Fragment data cap <= 0");
 
-                dataPacket->setMsgType(DATA);
-                dataPacket->setDataInt(currDataInt+k);
-                dataPacket->setSource(nodeId);
-                dataPacket->setVia(nodeId);
-                dataPacket->setDestination(destinations[j]);
-                dataPacket->getOptions().setAppACKReq(requestACKfromApp);
+                int origLen = dataPacketSize;
+                int fragCount = (origLen + cap - 1) / cap;
+                int appSeq    = nextFragSeq++;          // one id for the whole original message
+                int remaining = origLen;
 
+                for (int fi = 0; fi < fragCount; ++fi) {
+                    int fragLen = std::min(remaining, cap);
+                    remaining -= fragLen;
 
-                // Drop locals bigger than the configured cap
-                const int maxAppPayloadBytes = par("maxAppPayloadBytes");
-                if (dataPacketSize > maxAppPayloadBytes) {
-                    EV_WARN << "Skipping local packet (" << dataPacketSize
-                            << "B > " << maxAppPayloadBytes << "B)\n";
-                    delete dataPacket;
-                    continue; // next destination
+                    LoRaAppPacket *frag = new LoRaAppPacket("DataPacket");
+                    frag->setMsgType(DATA);
+
+                    // Make each fragment's dataInt unique (avoid false duplicate suppression)
+                    // (currDataInt << 8) | fi -> room for up to 256 fragments per message
+                    frag->setDataInt( (currDataInt << 8) | fi );
+
+                    frag->setSource(nodeId);
+                    frag->setVia(nodeId);
+                    frag->setDestination(destinations[j]);
+                    frag->getOptions().setAppACKReq(requestACKfromApp);
+
+                    // Account for our fragment header
+                    frag->setByteLength(FRAG_HDR_SIZE + fragLen);
+                    frag->setDepartureTime(simTime());
+
+                    // TTL as before
+                    switch (routingMetric) {
+                        default: frag->setTtl(packetTTL); break;
+                    }
+
+                    // Fragment header
+                    frag->setFrag(true);
+                    frag->setFragSeq(appSeq);       // the original message id
+                    frag->setFragIndex(fi);
+                    frag->setFragCount(fragCount);
+                    frag->setTotalLen(origLen);
+
+                    LoRaPacketsToSend.push_back(*frag);
+                    delete frag;
                 }
 
-                dataPacket->setByteLength(dataPacketSize);
-                dataPacket->setDepartureTime(simTime());
-
-
-                switch (routingMetric) {
-    //            case 0:
-    //                dataPacket->setTtl(1);
-    //                break;
-                default:
-                    dataPacket->setTtl(packetTTL);
-                    break;
-                }
-
-                LoRaPacketsToSend.push_back(*dataPacket);
-                delete dataPacket;
             }
             currDataInt++;
         }
