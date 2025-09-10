@@ -63,4 +63,9 @@ packet LoRaAppPacket {
     int via;
 	LoRaRoute routingTable[];
 	simtime_t departureTime;
+	bool frag = false;   // true if this packet is a fragment
+    int  fragSeq = 0;    // per-message sequence id (same for all frags of one message)
+    int  fragIndex = 0;  // 0-based index of this fragment
+    int  fragCount = 0;  // total fragments in this message
+    int  totalLen = 0;   // original app payload length (bytes)
 }
