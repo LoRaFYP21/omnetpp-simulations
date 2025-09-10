@@ -18,6 +18,9 @@
 
 #include <omnetpp.h>
 #include <string>
+#include <map>
+#include <vector>
+
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -264,6 +267,33 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 simtime_t valid;
         };
         std::vector<singleMetricRoute> singleMetricRoutingTable;
+
+        static const int FRAG_HDR_SIZE = 8;   // bytes added by our fragment header fields
+            int nextFragSeq = 0;                  // app-level seq id for original (pre-fragment) messages
+
+            struct FragKey {
+                int src;
+                int seq;
+                bool operator<(const FragKey& o) const {
+                    return (src < o.src) || (src == o.src && seq < o.seq);
+                }
+            };
+            struct FragReasm {
+                int totalLen = 0;
+                int fragCount = 0;
+                std::vector<bool> present;
+                std::vector<simtime_t> depTimes;  // departure time per fragment
+                simtime_t firstArrival = SIMTIME_ZERO;
+            };
+
+            std::map<FragKey, FragReasm> reasm;
+
+            // optional counters
+            long reassembledMessages = 0;
+            long fragDrops = 0;
+
+            // handle local delivery & reassembly (called with a DUP)
+            void handleFragmentForMe(LoRaAppPacket *pkt);
 
         class dualMetricRoute {
 
