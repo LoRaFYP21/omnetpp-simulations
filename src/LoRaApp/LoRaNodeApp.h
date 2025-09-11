@@ -3,15 +3,15 @@
 // it under the terms of the GNU Lesser General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
-// 
+//
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU Lesser General Public License for more details.
-// 
+//
 // You should have received a copy of the GNU Lesser General Public License
 // along with this program.  If not, see http://www.gnu.org/licenses/.
-// 
+//
 
 #ifndef __LORA_OMNET_LORANODEAPP_H_
 #define __LORA_OMNET_LORANODEAPP_H_
@@ -30,13 +30,14 @@
 
 using namespace omnetpp;
 
-namespace inet {
-
-/**
- * TODO - Generated class
- */
-class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
+namespace inet
 {
+
+    /**
+     * TODO - Generated class
+     */
+    class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
+    {
     protected:
         virtual void initialize(int stage) override;
         void finish() override;
@@ -45,9 +46,9 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         virtual bool handleOperationStage(LifecycleOperation *operation, int stage, IDoneCallback *doneCallback) override;
         virtual bool isNeighbour(int neighbourId);
         virtual bool isRouteInSingleMetricRoutingTable(int id, int via);
-        virtual int  getRouteIndexInSingleMetricRoutingTable(int id, int via);
+        virtual int getRouteIndexInSingleMetricRoutingTable(int id, int via);
         virtual bool isRouteInDualMetricRoutingTable(int id, int via, int sf);
-        virtual int  getRouteIndexInDualMetricRoutingTable(int id, int via, int sf);
+        virtual int getRouteIndexInDualMetricRoutingTable(int id, int via, int sf);
         virtual bool isKnownNode(int knownNodeId);
         virtual bool isACKed(int nodeId);
         virtual bool isPacketForwarded(cMessage *msg);
@@ -71,7 +72,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void manageReceivedAckPacketToForward(cMessage *msg);
         void manageReceivedDataPacketToForward(cMessage *msg);
         void manageReceivedRoutingPacket(cMessage *msg);
-        std::pair<double,double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
+        std::pair<double, double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
         void sendJoinRequest();
         void sendDownMgmtPacket();
         void generateDataPackets();
@@ -169,13 +170,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t firstDataPacketReceptionTime;
         simtime_t lastDataPacketReceptionTime;
 
-
         simtime_t simTimeResolution;
 
         cMessage *configureLoRaParameters;
         cMessage *selfPacket;
 
-        //history of sent packets;
+        // history of sent packets;
         cOutVector txSfVector;
         cOutVector txTpVector;
 
@@ -186,25 +186,25 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         // cOutVector DistanceX;
         // cOutVector DistanceY;
 
-        //variables to control ADR
+        // variables to control ADR
         bool evaluateADRinNode;
         int ADR_ACK_CNT = 0;
-        int ADR_ACK_LIMIT = 64; //64;
-        int ADR_ACK_DELAY = 32; //32;
+        int ADR_ACK_LIMIT = 64; // 64;
+        int ADR_ACK_DELAY = 32; // 32;
         bool sendNextPacketWithADRACKReq = false;
         void increaseSFIfPossible();
 
         int currDataInt;
 
-        //General network variables
+        // General network variables
         int numberOfNodes;
         int numberOfEndNodes;
 
-        //Packet sizes
+        // Packet sizes
         int dataPacketSize;
         int routingPacketMaxSize;
 
-        //Routing variables
+        // Routing variables
         int routingMetric;
         bool routeDiscovery;
         int windowSize;
@@ -217,7 +217,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         double ownDataPriority;
         int packetTTL;
 
-        //Node info
+        // Node info
         int nodeId;
 
         std::vector<int> neighbourNodes;
@@ -228,61 +228,69 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         std::vector<LoRaAppPacket> LoRaPacketsForwarded;
         std::vector<LoRaAppPacket> DataPacketsForMe;
 
-
-        //Application parameters
+        // Application parameters
         bool requestACKfromApp;
         bool stopOnACK;
         bool AppACKReceived;
         int firstACK;
 
-        //Spreading factor
+        // Spreading factor
         bool increaseSF;
         int firstACKSF;
         int packetsPerSF;
         int packetsInSF;
 
-        //LoRa settings
+        // LoRa settings
         int minLoRaSF;
         int maxLoRaSF;
 
-        //Forwarded packets vector size
+        // Forwarded packets vector size
         int forwardedPacketVectorSize;
 
-        //Forward packets buffer max vector size
+        // Forward packets buffer max vector size
         int packetsToForwardMaxVectorSize;
 
-        // Routing tables
-        class singleMetricRoute {
+        // Export routing table flag
+        bool exportRoutingTable;
+        bool logRouteSelection;
+        void logChosenRoute(const char *phase, int dest, int via, bool broadcastFallback);
+        int forceDestination;
+        bool enableDataGeneration;
 
-            public:
-                int id;
-                int via;
-                double metric;
-                int window[33];
-                simtime_t valid;
+        // Routing tables
+        class singleMetricRoute
+        {
+
+        public:
+            int id;
+            int via;
+            double metric;
+            int window[33];
+            simtime_t valid;
         };
         std::vector<singleMetricRoute> singleMetricRoutingTable;
 
-        class dualMetricRoute {
+        class dualMetricRoute
+        {
 
-            public:
-                int id;
-                int via;
-                double priMetric;
-                double secMetric;
-                int window[33];
-                int sf;
-                simtime_t valid;
+        public:
+            int id;
+            int via;
+            double priMetric;
+            double secMetric;
+            int window[33];
+            int sf;
+            simtime_t valid;
         };
         std::vector<dualMetricRoute> dualMetricRoutingTable;
-
 
         /**
          * @name CsmaCaMac state variables
          * Various state information checked and modified according to the state machine.
          */
         //@{
-        enum State {
+        enum State
+        {
             IDLE,
             TRANSMIT,
             WAIT_DELAY_1,
@@ -293,11 +301,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
             RECEIVING_2,
         };
 
-
     public:
         LoRaNodeApp() {}
         simsignal_t LoRa_AppPacketSent;
-        //LoRa physical layer parameters
+        // LoRa physical layer parameters
         double loRaTP;
         units::values::Hz loRaCF;
         int loRaSF;
@@ -306,8 +313,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         bool loRaUseHeader;
         bool loRaCAD;
         double loRaCADatt;
-
-};
+    };
 
 }
 

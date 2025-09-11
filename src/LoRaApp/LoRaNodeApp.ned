@@ -84,6 +84,14 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+    // If true, the application will export its routing table(s) to a text file at the end of the simulation
+    bool exportRoutingTable = default(false);
+    // If true, each data/forward packet transmission logs the selected next hop to a trace file
+    bool logRouteSelection = default(false);
+    // If >=0, override randomly chosen destinations and always send ONLY to this destination (if different from own id)
+    int forceDestination = default(-1);
+    // Per-node switch to allow disabling data generation (still can forward and route)
+    bool enableDataGeneration = default(true);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
