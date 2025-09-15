@@ -9,6 +9,8 @@
 *.dylib
 *.dll
 
+*.csv
+
 # Compiled Static libraries
 *.lai
 *.la
