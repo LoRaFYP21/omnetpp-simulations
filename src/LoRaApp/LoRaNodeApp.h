@@ -18,6 +18,8 @@
 
 #include <omnetpp.h>
 #include <string>
+// CSV logging
+#include <fstream>
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -81,6 +83,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int getSFTo(int destination);
 
         simtime_t calculateTransmissionDuration(cMessage *msg);
+
+    // Routing table CSV logging helpers
+    void openRoutingCsv();
+    void logRoutingSnapshot(const char *eventName);
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
@@ -275,6 +281,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 simtime_t valid;
         };
         std::vector<dualMetricRoute> dualMetricRoutingTable;
+
+    // CSV logging state
+    std::ofstream routingCsv;
+    bool routingCsvReady = false;
+    std::string routingCsvPath;
 
 
         /**

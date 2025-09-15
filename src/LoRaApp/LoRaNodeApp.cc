@@ -17,6 +17,13 @@
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
 #include "../LoRa/LoRaMac.h"
+#include <sstream>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 
 #include "inet/mobility/static/StationaryMobility.h"
@@ -315,9 +322,12 @@ void LoRaNodeApp::initialize(int stage) {
         DataPacketsForMe = {};
         ACKedNodes = {};
 
-        //Routing table
+    //Routing table
         singleMetricRoutingTable = {};
         dualMetricRoutingTable = {};
+
+    // Prepare routing CSV path (per-node file)
+    openRoutingCsv();
 
         //Node identifier
         nodeId = getContainingNode(this)->getIndex();
@@ -645,6 +655,8 @@ void LoRaNodeApp::finish() {
 
     dataPacketsForMeLatency.recordAs("dataPacketsForMeLatency");
     dataPacketsForMeUniqueLatency.recordAs("dataPacketsForMeUniqueLatency");
+
+    // No persistent CSV stream; snapshots overwrite per write
 }
 
 void LoRaNodeApp::handleMessage(cMessage *msg) {
@@ -909,7 +921,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
         receivedRoutingPackets++;
 
-        sanitizeRoutingTable();
+    sanitizeRoutingTable();
 
         switch (routingMetric) {
 
@@ -1146,12 +1158,77 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                 break;
         }
         routingTableSize.collect(singleMetricRoutingTable.size());
+
+        // Log snapshot after processing routing packet
+        logRoutingSnapshot("routing_packet_processed");
     }
 
     EV << "## Routing table at node " << nodeId << "##" << endl;
     for (int i=0; i<singleMetricRoutingTable.size(); i++) {
         EV << "Node " << singleMetricRoutingTable[i].id << " via " << singleMetricRoutingTable[i].via << " with cost " << singleMetricRoutingTable[i].metric << endl;
     }
+}
+
+void LoRaNodeApp::openRoutingCsv() {
+    // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("routing_tables");
+    // Try to create folder using C runtime; if it exists, ignore errors
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+
+    // File name includes nodeId
+    std::stringstream ss;
+    ss << folder << sep << "node_" << nodeId << "_routing.csv";
+    routingCsvPath = ss.str();
+    routingCsvReady = true;
+}
+
+void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
+    if (!routingCsvReady) return;
+    // Open file in truncate mode to reflect current snapshot
+    routingCsv.open(routingCsvPath, std::ios::out | std::ios::trunc);
+    if (!routingCsv.is_open()) return;
+    // Write header each time
+    routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
+    const char *metricName = nullptr;
+    switch (routingMetric) {
+        case NO_FORWARDING: metricName = "NO_FORWARDING"; break;
+        case FLOODING_BROADCAST_SINGLE_SF: metricName = "FLOODING"; break;
+        case SMART_BROADCAST_SINGLE_SF: metricName = "SMART_BROADCAST"; break;
+        case HOP_COUNT_SINGLE_SF: metricName = "HOP_COUNT"; break;
+        case RSSI_SUM_SINGLE_SF: metricName = "RSSI_SUM"; break;
+        case RSSI_PROD_SINGLE_SF: metricName = "RSSI_PROD"; break;
+        case ETX_SINGLE_SF: metricName = "ETX"; break;
+        case TIME_ON_AIR_HC_CAD_SF: metricName = "TOA_HC"; break;
+        case TIME_ON_AIR_SF_CAD_SF: metricName = "TOA"; break;
+        default: metricName = "UNKNOWN"; break;
+    }
+    // Single-metric table
+    for (const auto &r : singleMetricRoutingTable) {
+        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
+                   << ',' << singleMetricRoutingTable.size()
+                   << ',' << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid
+                   << ",,,"  // placeholders for dual-metric columns
+                   << std::endl;
+    }
+    // Dual-metric table
+    for (const auto &r : dualMetricRoutingTable) {
+        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
+                   << ',' << dualMetricRoutingTable.size()
+                   << ',' << r.id << ',' << r.via << ",," << r.valid
+                   << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric
+                   << std::endl;
+    }
+    routingCsv.flush();
+    routingCsv.close();
 }
 
 void LoRaNodeApp::manageReceivedPacketToForward(cMessage *msg) {
