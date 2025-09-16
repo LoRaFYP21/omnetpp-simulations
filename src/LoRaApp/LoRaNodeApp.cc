@@ -456,6 +456,10 @@ void LoRaNodeApp::initialize(int stage) {
         if (timeToFailureParam >= 0 && !failureEvent) {
             scheduleFailure();
         }
+        if (timeToFailureParam >= 0 && !failureEvent) {
+            EV_WARN << "[FailureDiag] WARNING: timeToFailureParam=" << timeToFailureParam << " but failureEvent not scheduled (unexpected)" << endl;
+            recordScalar("failureSchedulingAnomaly", 1);
+        }
 
         if (dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
 
@@ -2291,6 +2295,22 @@ void LoRaNodeApp::performFailure() {
         failureEvent = nullptr;
     }
     bubble("Node FAILED (simulated random failure)");
+    // Record immediate scalars if not already
+    recordScalar("failed", 1);
+    recordScalar("failureTime", failureTime);
+    // Visual indication in GUI (if running Qtenv)
+    cModule *parentNode = getParentModule();
+    if (parentNode) {
+        try {
+            cDisplayString &ds = parentNode->getDisplayString();
+            // Add semi-transparent red background halo and tooltip
+            ds.setTagArg("b", 0, "30");
+            ds.setTagArg("b", 1, "#FF000080");
+            ds.setTagArg("tt", 0, (std::string("FAILED at ")+failureTime.str()).c_str());
+            // Attempt to tint icon
+            ds.setTagArg("i", 1, "#ff0000");
+        } catch(...) {}
+    }
 }
 
 void LoRaNodeApp::exportRoutingTables() {
