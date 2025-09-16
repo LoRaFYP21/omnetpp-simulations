@@ -92,6 +92,9 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // Routing table CSV logging helpers
     void openRoutingCsv();
     void logRoutingSnapshot(const char *eventName);
+    // Delivery logging helpers
+    void openDeliveredCsv();
+    void logDeliveredPacket(const LoRaAppPacket *packet);
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
@@ -291,6 +294,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::ofstream routingCsv;
     bool routingCsvReady = false;
     std::string routingCsvPath;
+    // Delivered packets CSV state
+    std::ofstream deliveredCsv;
+    bool deliveredCsvReady = false;
+    std::string deliveredCsvPath;
 
 
         /**
@@ -313,6 +320,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     public:
         LoRaNodeApp() {}
         simsignal_t LoRa_AppPacketSent;
+        simsignal_t LoRa_AppPacketDelivered;
         //LoRa physical layer parameters
         double loRaTP;
         units::values::Hz loRaCF;

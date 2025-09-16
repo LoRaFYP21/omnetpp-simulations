@@ -192,12 +192,15 @@ void LoRaNodeApp::initialize(int stage) {
         dutyCycle = par("dutyCycle");
         numberOfDestinationsPerNode = par("numberOfDestinationsPerNode");
         numberOfPacketsPerDestination = par("numberOfPacketsPerDestination");
+    bool forceSingleDestination = par("forceSingleDestination");
+    int forcedDestinationId = par("forcedDestinationId");
 
         numberOfPacketsToForward = par("numberOfPacketsToForward");
 
         packetsToForwardMaxVectorSize = par("packetsToForwardMaxVectorSize");
 
         LoRa_AppPacketSent = registerSignal("LoRa_AppPacketSent");
+    LoRa_AppPacketDelivered = registerSignal("LoRa_AppPacketDelivered");
 
         currDataInt = 0;
 
@@ -328,6 +331,8 @@ void LoRaNodeApp::initialize(int stage) {
 
     // Prepare routing CSV path (per-node file)
     openRoutingCsv();
+    // Prepare delivered CSV path (per-node file)
+    openDeliveredCsv();
 
         //Node identifier
         nodeId = getContainingNode(this)->getIndex();
@@ -1252,6 +1257,51 @@ void LoRaNodeApp::openRoutingCsv() {
     routingCsvReady = true;
 }
 
+void LoRaNodeApp::openDeliveredCsv() {
+    // Build folder and file name under simulations/delivered_packets
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+    std::stringstream ss;
+    ss << folder << sep << "node_" << nodeId << "_delivered.csv";
+    deliveredCsvPath = ss.str();
+    // Create the file if absent and write a simple header once
+    std::ofstream f(deliveredCsvPath, std::ios::out | std::ios::app);
+    if (f.is_open()) {
+        if (f.tellp() == 0) {
+            f << "simTime,src,dst,seq,ttl,viaBefore,arrivalNode" << std::endl;
+        }
+        f.close();
+        deliveredCsvReady = true;
+    } else {
+        deliveredCsvReady = false;
+    }
+}
+
+void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
+    if (!deliveredCsvReady) return;
+    deliveredCsv.open(deliveredCsvPath, std::ios::out | std::ios::app);
+    if (!deliveredCsv.is_open()) return;
+    deliveredCsv << simTime() << ","
+                 << packet->getSource() << ","
+                 << packet->getDestination() << ","
+                 << packet->getDataInt() << ","
+                 << packet->getTtl() << ","
+                 << packet->getVia() << ","
+                 << nodeId
+                 << std::endl;
+    deliveredCsv.flush();
+    deliveredCsv.close();
+}
+
 void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     if (!routingCsvReady) return;
     // Open file in truncate mode to reflect current snapshot
@@ -1420,7 +1470,10 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
     switch (packet->getMsgType()) {
     // DATA packet
     case DATA:
-        //manageReceivedDataPacketForMe(packet);
+        // Log definitive delivery and emit a signal for statistics
+        logDeliveredPacket(packet);
+        emit(LoRa_AppPacketDelivered, (long)packet->getSource());
+        // Existing behavior: forward even at destination (can be tightened later)
         std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
         manageReceivedDataPacketToForward(packet);
         break;
@@ -1949,27 +2002,33 @@ void LoRaNodeApp::generateDataPackets() {
 
     if (!onlyNode0SendsPackets || nodeId == 0) {
         std::vector<int> destinations = { };
+        // If configured, force node 0 to send only to a specific destination
+        bool forceSingleDestination = par("forceSingleDestination");
+        int forcedDestinationId = par("forcedDestinationId");
+        if (forceSingleDestination && nodeId == 0 && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+            destinations.push_back(forcedDestinationId);
+        } else {
+            if (numberOfDestinationsPerNode == 0 )
+                numberOfDestinationsPerNode = numberOfNodes-1;
 
-        if (numberOfDestinationsPerNode == 0 )
-            numberOfDestinationsPerNode = numberOfNodes-1;
+            while (destinations.size() < numberOfDestinationsPerNode
+                    && numberOfNodes - 1 - destinations.size() > 0) {
 
-        while (destinations.size() < numberOfDestinationsPerNode
-                && numberOfNodes - 1 - destinations.size() > 0) {
+                int destination = intuniform(0, numberOfNodes - 1);
 
-            int destination = intuniform(0, numberOfNodes - 1);
+                if (destination != nodeId) {
+                    bool newDestination = true;
 
-            if (destination != nodeId) {
-                bool newDestination = true;
-
-                for (int i = 0; i < destinations.size(); i++) {
-                    if (destination == destinations[i]) {
-                        newDestination = false;
-                        break;
+                    for (int i = 0; i < destinations.size(); i++) {
+                        if (destination == destinations[i]) {
+                            newDestination = false;
+                            break;
+                        }
                     }
-                }
 
-                if (newDestination) {
-                    destinations.push_back(destination);
+                    if (newDestination) {
+                        destinations.push_back(destination);
+                    }
                 }
             }
         }
