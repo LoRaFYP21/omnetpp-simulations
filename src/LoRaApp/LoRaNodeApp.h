@@ -82,11 +82,21 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
 
+        // Failure simulation helpers
+        void scheduleFailure();
+        void performFailure();
+        bool failed = false;
+        cMessage *failureEvent = nullptr;
+        simtime_t failureTime = -1;
+        double failureJitterFracParam = 0;
+        simtime_t timeToFailureParam = -1;
+
         simtime_t calculateTransmissionDuration(cMessage *msg);
 
     // Routing table CSV logging helpers
     void openRoutingCsv();
     void logRoutingSnapshot(const char *eventName);
+    void exportRoutingTables(); // export routing tables at finish
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
