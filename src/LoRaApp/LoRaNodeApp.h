@@ -93,6 +93,15 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         simtime_t calculateTransmissionDuration(cMessage *msg);
 
+    // Global failure subset (shared across instances)
+    static bool globalFailureInitialized;        // whether subset was chosen
+    static std::vector<int> globalFailingNodes;  // chosen node indices
+    static int globalFailureSubsetCountParam;    // cached param
+    static double globalFailureStartTimeParam; // cached (seconds)
+    static double globalFailureExpMeanParam;   // cached mean (seconds)
+    static int globalTotalNodesObserved;          // track highest node index+1 seen
+    void initGlobalFailureSelection();            // choose subset if needed
+
     // Routing table CSV logging helpers
     void openRoutingCsv();
     void logRoutingSnapshot(const char *eventName);
