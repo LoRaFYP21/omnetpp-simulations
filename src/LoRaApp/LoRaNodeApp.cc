@@ -450,9 +450,29 @@ void LoRaNodeApp::initialize(int stage) {
 
         selfPacket = new cMessage("selfPacket");
         EV_INFO << "selfPacket vinuja" <<endl;
-        // Failure scheduling parameters
+        // Failure scheduling parameters (local + optional global subset override)
         timeToFailureParam = par("timeToFailure");
         failureJitterFracParam = par("failureJitterFrac");
+
+        // Global subset logic: only executed once globally, then applied per node
+        initGlobalFailureSelection();
+        if (globalFailureSubsetCountParam > 0) {
+            // Determine if this node is in the chosen failing subset
+            bool inSubset = std::find(globalFailingNodes.begin(), globalFailingNodes.end(), nodeId) != globalFailingNodes.end();
+            if (!inSubset) {
+                timeToFailureParam = -1; // force disable
+            } else {
+                // Compose failure time: start offset + (optional exponential tail)
+                simtime_t startOffset = globalFailureStartTimeParam >= 0 ? simtime_t(globalFailureStartTimeParam) : SIMTIME_ZERO;
+                simtime_t tail = SIMTIME_ZERO;
+                if (globalFailureExpMeanParam > 0) {
+                    tail = exponential(globalFailureExpMeanParam);
+                }
+                timeToFailureParam = startOffset + tail; // deterministic or shifted exponential
+                failureJitterFracParam = 0; // jitter not applied with global logic
+            }
+        }
+
         if (timeToFailureParam >= 0 && !failureEvent) {
             scheduleFailure();
         }
@@ -2370,6 +2390,53 @@ void LoRaNodeApp::exportRoutingTables() {
                 txt << "Node failed at: " << failureTime << "\n";
             }
         }
+    }
+}
+
+// -------- Global failure selection static members --------
+bool LoRaNodeApp::globalFailureInitialized = false;
+std::vector<int> LoRaNodeApp::globalFailingNodes = {};
+int LoRaNodeApp::globalFailureSubsetCountParam = -1;
+double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
+double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
+int LoRaNodeApp::globalTotalNodesObserved = 0;
+
+void LoRaNodeApp::initGlobalFailureSelection() {
+    // Read parameters (each instance sees same values); perform selection once
+    int subsetCount = par("globalFailureSubsetCount");
+    simtime_t startTime = par("globalFailureStartTime");
+    simtime_t expMean = par("globalFailureExpMean");
+    if (subsetCount <= 0) {
+        // Nothing to do
+        globalFailureSubsetCountParam = -1;
+        return;
+    }
+    // Track max nodes observed (for late module creation scenarios)
+    if (nodeId + 1 > globalTotalNodesObserved)
+        globalTotalNodesObserved = nodeId + 1;
+    if (!globalFailureInitialized) {
+        globalFailureSubsetCountParam = subsetCount;
+    globalFailureStartTimeParam = (startTime >= SIMTIME_ZERO) ? startTime.dbl() : 0.0;
+    globalFailureExpMeanParam = expMean.dbl();
+        // Build list of all node indices we have now; assume numberOfNodes covers relay nodes
+        int total = par("numberOfNodes");
+        if (total <= 0) total = globalTotalNodesObserved; // fallback
+        std::vector<int> all;
+        all.reserve(total);
+        for (int i = 0; i < total; ++i) all.push_back(i);
+        // Shuffle and take first subsetCount (cMersenneTwister via intrand?)
+        for (int i = 0; i < (int)all.size(); ++i) {
+            int j = intuniform(i, (int)all.size()-1);
+            std::swap(all[i], all[j]);
+        }
+        if (subsetCount > total) subsetCount = total;
+        globalFailingNodes.assign(all.begin(), all.begin()+subsetCount);
+        globalFailureInitialized = true;
+        EV_INFO << "[GlobalFailure] Selected " << subsetCount << " failing nodes out of " << total 
+                << ". StartOffset=" << globalFailureStartTimeParam << "s"
+                << " expMean=" << globalFailureExpMeanParam << "s Nodes=";
+        for (size_t k=0;k<globalFailingNodes.size();++k) EV_INFO << globalFailingNodes[k] << (k+1<globalFailingNodes.size()?",":"");
+        EV_INFO << endl;
     }
 }
 
