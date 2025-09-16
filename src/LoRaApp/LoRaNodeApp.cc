@@ -967,7 +967,11 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                 break;
                         }
 
-                    singleMetricRoutingTable.push_back(newNeighbour);
+                    if (storeBestRoutesOnly) {
+                        addOrReplaceBestSingleRoute(newNeighbour);
+                    } else {
+                        singleMetricRoutingTable.push_back(newNeighbour);
+                    }
                 }
 
                 // or refresh route to known neighbour.
@@ -1030,7 +1034,11 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                 break;
                             }
 
-                            singleMetricRoutingTable.push_back(newRoute);
+                            if (storeBestRoutesOnly) {
+                                addOrReplaceBestSingleRoute(newRoute);
+                            } else {
+                                singleMetricRoutingTable.push_back(newRoute);
+                            }
                         }
                         // Or update known one
                         else {
@@ -1053,6 +1061,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                         break;
                                 }
                                 singleMetricRoutingTable[routeIndex].valid = simTime() + routeTimeout;
+                                // If keeping only best route, ensure table consistency against other candidates
+                                if (storeBestRoutesOnly) {
+                                    addOrReplaceBestSingleRoute(singleMetricRoutingTable[routeIndex]);
+                                }
                             }
                         }
                     }
@@ -1169,6 +1181,55 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     }
 }
 
+// Helper: keep only the best route per destination (single-metric tables)
+// Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
+void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
+    // Make a safe copy because we'll potentially erase from the vector
+    LoRaNodeApp::singleMetricRoute cand = candidate;
+    // Find all entries for this destination id
+    int bestIdx = -1;
+    for (int i = 0; i < (int)singleMetricRoutingTable.size(); ++i) {
+        if (singleMetricRoutingTable[i].id == candidate.id) {
+            if (bestIdx == -1) {
+                bestIdx = i;
+            } else {
+                // Determine if current i is better than current bestIdx
+                const auto &cur = singleMetricRoutingTable[i];
+                const auto &best = singleMetricRoutingTable[bestIdx];
+                if (cur.metric < best.metric ||
+                    (cur.metric == best.metric && cur.valid > best.valid)) {
+                    bestIdx = i;
+                }
+            }
+        }
+    }
+
+    // Compare candidate against current best (if any)
+    bool candidateIsBest = true;
+    if (bestIdx != -1) {
+        const auto &best = singleMetricRoutingTable[bestIdx];
+        if (best.metric < cand.metric ||
+            (best.metric == cand.metric && best.valid >= cand.valid)) {
+            candidateIsBest = false;
+        }
+    }
+
+    if (candidateIsBest) {
+        // Remove all routes to this destination, then insert candidate
+        for (auto it = singleMetricRoutingTable.begin(); it != singleMetricRoutingTable.end(); ) {
+            if (it->id == cand.id) it = singleMetricRoutingTable.erase(it); else ++it;
+        }
+        singleMetricRoutingTable.push_back(cand);
+    } else {
+        // Candidate is worse; if there is no entry for this destination yet, insert it, else ignore
+        if (bestIdx == -1) {
+            singleMetricRoutingTable.push_back(cand);
+            // Now reduce to one (candidate is the only one)
+        }
+        // else do nothing (keep the existing best)
+    }
+}
+
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1196,8 +1257,7 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     // Open file in truncate mode to reflect current snapshot
     routingCsv.open(routingCsvPath, std::ios::out | std::ios::trunc);
     if (!routingCsv.is_open()) return;
-    // Write header each time
-    routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
+    // Write rows in key=value format for readability
     const char *metricName = nullptr;
     switch (routingMetric) {
         case NO_FORWARDING: metricName = "NO_FORWARDING"; break;
@@ -1213,18 +1273,34 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     }
     // Single-metric table
     for (const auto &r : singleMetricRoutingTable) {
-        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
-                   << ',' << singleMetricRoutingTable.size()
-                   << ',' << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid
-                   << ",,,"  // placeholders for dual-metric columns
+        routingCsv << "simTime=" << simTime()
+                   << ",event=" << eventName
+                   << ",nodeId=" << nodeId
+                   << ",metricType=" << metricName
+                   << ",tableSize=" << singleMetricRoutingTable.size()
+                   << ",id=" << r.id
+                   << ",via=" << r.via
+                   << ",metric=" << r.metric
+                   << ",validUntil=" << r.valid
+                   << ",sf="
+                   << ",priMetric="
+                   << ",secMetric="
                    << std::endl;
     }
     // Dual-metric table
     for (const auto &r : dualMetricRoutingTable) {
-        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
-                   << ',' << dualMetricRoutingTable.size()
-                   << ',' << r.id << ',' << r.via << ",," << r.valid
-                   << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric
+        routingCsv << "simTime=" << simTime()
+                   << ",event=" << eventName
+                   << ",nodeId=" << nodeId
+                   << ",metricType=" << metricName
+                   << ",tableSize=" << dualMetricRoutingTable.size()
+                   << ",id=" << r.id
+                   << ",via=" << r.via
+                   << ",metric="
+                   << ",validUntil=" << r.valid
+                   << ",sf=" << r.sf
+                   << ",priMetric=" << r.priMetric
+                   << ",secMetric=" << r.secMetric
                    << std::endl;
     }
     routingCsv.flush();

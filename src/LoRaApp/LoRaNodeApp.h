@@ -40,6 +40,9 @@ namespace inet {
 class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 {
     protected:
+        // Forward declaration so we can reference the nested type in prototypes above its definition
+        class singleMetricRoute;
+
         virtual void initialize(int stage) override;
         void finish() override;
         virtual int numInitStages() const override { return NUM_INIT_STAGES; }
@@ -78,6 +81,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void sendDownMgmtPacket();
         void generateDataPackets();
         void sanitizeRoutingTable();
+    // When enabled (storeBestRouteOnly), ensure at most one route per destination id
+    void addOrReplaceBestSingleRoute(const singleMetricRoute &candidate);
         int pickCADSF();
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
