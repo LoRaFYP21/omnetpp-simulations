@@ -84,6 +84,8 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+        volatile double timeToFailure @unit(s) = default(-1s); // <0 means never fail
+        double failureJitterFrac = default(0); // fraction of timeToFailure for +/- uniform jitter
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
