@@ -84,6 +84,16 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+        volatile double timeToFailure @unit(s) = default(-1s); // <0 means never fail
+        double failureJitterFrac = default(0); // fraction of timeToFailure for +/- uniform jitter
+    // Global failure control (optional): if globalFailureSubsetCount > 0 then exactly that many nodes
+    // will be chosen at runtime to fail. Their failure time will be:
+    //   globalFailureStartTime + (exponential(globalFailureExpMean) if globalFailureExpMean>0 else 0)
+    // All other nodes get timeToFailure = -1 (disabled). These parameters let you set the number
+    // of failing nodes and a common start offset directly from the run configuration dialog.
+    int globalFailureSubsetCount = default(-1);          // <=0 disables global subset logic
+    volatile double globalFailureStartTime @unit(s) = default(-1s); // >=0 enables start offset logic
+    volatile double globalFailureExpMean @unit(s) = default(0s);    // mean for exponential tail; 0 => deterministic
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
