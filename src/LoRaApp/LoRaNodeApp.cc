@@ -450,6 +450,13 @@ void LoRaNodeApp::initialize(int stage) {
 
         selfPacket = new cMessage("selfPacket");
         EV_INFO << "selfPacket vinuja" <<endl;
+        // Failure scheduling parameters
+        timeToFailureParam = par("timeToFailure");
+        failureJitterFracParam = par("failureJitterFrac");
+        if (timeToFailureParam >= 0 && !failureEvent) {
+            scheduleFailure();
+        }
+
         if (dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
 
             // Only data packet due
@@ -544,6 +551,14 @@ void LoRaNodeApp::finish() {
 
     recordScalar("finalTP", loRaTP);
     recordScalar("finalSF", loRaSF);
+
+    // Failure related scalars
+    recordScalar("failed", failed ? 1 : 0);
+    if (failureTime >= SIMTIME_ZERO)
+        recordScalar("failureTime", failureTime);
+
+    // Export routing tables (CSV + TXT snapshot at end)
+    exportRoutingTables();
 
     recordScalar("sentPackets", sentPackets);
     recordScalar("sentDataPackets", sentDataPackets);
@@ -660,7 +675,11 @@ void LoRaNodeApp::finish() {
 }
 
 void LoRaNodeApp::handleMessage(cMessage *msg) {
-
+    // If node already failed, drop everything except to process (already processed) failure event
+    if (failed) {
+        delete msg;
+        return;
+    }
     if (msg->isSelfMessage()) {
         handleSelfMessage(msg);
     } else {
@@ -670,6 +689,16 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
 
 
 void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
+
+    // If this is the failure event, perform failure and stop any further actions
+    if (msg == failureEvent) {
+        performFailure();
+        return;
+    }
+
+    if (failed) {
+        return; // Ignore timers after failure
+    }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
@@ -844,6 +873,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 }
 
 void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
+    if (failed) { delete msg; return; }
     receivedPackets++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
@@ -1392,6 +1422,7 @@ bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
 
 
 simtime_t LoRaNodeApp::sendDataPacket() {
+    if (failed) return 0; // Do not send after failure
     LoRaAppPacket *dataPacket = new LoRaAppPacket("DataFrame");
     std::cout << " i am sending the packet: "  << std::endl;
     bool localData = true;
@@ -1599,6 +1630,7 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 }
 
 simtime_t LoRaNodeApp::sendForwardPacket() {
+    if (failed) return 0; // Do not send after failure
     LoRaAppPacket *forwardPacket = new LoRaAppPacket("DataFrame");
     std::cout << " im here forwarding the new packet: "  << std::endl;
     bool transmit = false;
@@ -1744,6 +1776,7 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
 
 simtime_t LoRaNodeApp::sendRoutingPacket() {
+    if (failed) return 0; // Do not send after failure
 
     bool transmit = false;
     simtime_t txDuration = 0;
@@ -1870,6 +1903,7 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 }
 
 void LoRaNodeApp::generateDataPackets() {
+    if (failed) return; // Do not generate after failure
 
     if (!onlyNode0SendsPackets || nodeId == 0) {
         std::vector<int> destinations = { };
@@ -2227,6 +2261,96 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
 
     const simtime_t duration = Tpreamble + Theader + Tpayload;
     return duration;
+}
+
+// ---------------- Failure handling & export helpers ----------------
+
+void LoRaNodeApp::scheduleFailure() {
+    // Apply jitter if configured
+    double base = timeToFailureParam.dbl();
+    if (base < 0) return;
+    double jitterFrac = std::max(0.0, failureJitterFracParam);
+    double jitterPortion = 0.0;
+    if (jitterFrac > 0) {
+        jitterPortion = uniform(-jitterFrac, jitterFrac) * base;
+    }
+    double scheduleDelay = std::max(0.0, base + jitterPortion);
+    failureEvent = new cMessage("failureEvent");
+    scheduleAt(simTime() + scheduleDelay, failureEvent);
+}
+
+void LoRaNodeApp::performFailure() {
+    if (failed) return; // idempotent
+    failed = true;
+    failureTime = simTime();
+    // Cancel any future transmissions
+    if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
+    // Release failureEvent (processed)
+    if (failureEvent) {
+        delete failureEvent;
+        failureEvent = nullptr;
+    }
+    bubble("Node FAILED (simulated random failure)");
+}
+
+void LoRaNodeApp::exportRoutingTables() {
+    // Ensure directory exists (reuse logic similar to openRoutingCsv)
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("routing_tables");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+
+    // CSV (single metric)
+    {
+        std::stringstream fcsv;
+        fcsv << folder << sep << "node" << nodeId << "_single.csv";
+        std::ofstream ofs(fcsv.str(), std::ios::out | std::ios::trunc);
+        if (ofs.is_open()) {
+            ofs << "id,via,metric,validUntil" << std::endl;
+            for (auto &r : singleMetricRoutingTable) {
+                ofs << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid << std::endl;
+            }
+        }
+    }
+    // CSV (dual metric)
+    {
+        std::stringstream fcsv2;
+        fcsv2 << folder << sep << "node" << nodeId << "_dual.csv";
+        std::ofstream ofs2(fcsv2.str(), std::ios::out | std::ios::trunc);
+        if (ofs2.is_open()) {
+            ofs2 << "id,via,sf,priMetric,secMetric,validUntil" << std::endl;
+            for (auto &r : dualMetricRoutingTable) {
+                ofs2 << r.id << ',' << r.via << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric << ',' << r.valid << std::endl;
+            }
+        }
+    }
+    // TXT human readable
+    {
+        std::stringstream ftxt;
+        ftxt << folder << sep << "node" << nodeId << "_routing_table.txt";
+        std::ofstream txt(ftxt.str(), std::ios::out | std::ios::trunc);
+        if (txt.is_open()) {
+            txt << "Node " << nodeId << " Routing Table (simTime=" << simTime() << ")\n";
+            txt << "Single-metric entries: " << singleMetricRoutingTable.size() << "\n";
+            for (auto &r : singleMetricRoutingTable) {
+                txt << " dest=" << r.id << " via=" << r.via << " metric=" << r.metric << " validUntil=" << r.valid << "\n";
+            }
+            txt << "Dual-metric entries: " << dualMetricRoutingTable.size() << "\n";
+            for (auto &r : dualMetricRoutingTable) {
+                txt << " dest=" << r.id << " via=" << r.via << " sf=" << r.sf << " pri=" << r.priMetric << " sec=" << r.secMetric << " validUntil=" << r.valid << "\n";
+            }
+            if (failed) {
+                txt << "Node failed at: " << failureTime << "\n";
+            }
+        }
+    }
 }
 
 simtime_t LoRaNodeApp::getTimeToNextRoutingPacket() {
