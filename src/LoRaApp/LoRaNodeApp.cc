@@ -13,6 +13,7 @@
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 //
 #include <iostream>
+#include <algorithm> // for std::max
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -419,8 +420,12 @@ void LoRaNodeApp::initialize(int stage) {
         }
         generateDataPackets();
 
-        // Routing packets timer
-        timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
+        // Routing packets timer (enforce a minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstRoutingPacket");
+            if (base < 5) base = 5;
+            timeToFirstRoutingPacket = base + getTimeToNextRoutingPacket();
+        }
         switch (routingMetric) {
             // No routing packets are to be sent
             case NO_FORWARDING:
@@ -435,16 +440,24 @@ void LoRaNodeApp::initialize(int stage) {
                 break;
         }
 
-        // Data packets timer
-        timeToFirstDataPacket = math::max(5, par("timeToFirstDataPacket"))+getTimeToNextDataPacket();
+        // Data packets timer (enforce minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstDataPacket");
+            if (base < 5) base = 5;
+            timeToFirstDataPacket = base + getTimeToNextDataPacket();
+        }
         if (LoRaPacketsToSend.size() > 0) {
                     dataPacketsDue = true;
                     nextDataPacketTransmissionTime = timeToFirstDataPacket;
                     EV << "Time to first data packet: " << timeToFirstDataPacket << endl;
         }
 
-        // Forward packets timer
-        timeToFirstForwardPacket = math::max(5, par("timeToFirstForwardPacket"))+getTimeToNextForwardPacket();
+        // Forward packets timer (enforce minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstForwardPacket");
+            if (base < 5) base = 5;
+            timeToFirstForwardPacket = base + getTimeToNextForwardPacket();
+        }
         // THis should not happen, though
         if (LoRaPacketsToForward.size() > 0) {
                     forwardPacketsDue = true;
@@ -725,11 +738,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                 // Update duty cycle end
                 dutyCycleEnd = simTime() + txDuration/dutyCycle;
                 // Update next routing packet transmission time, taking the duty cycle into account
-                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl()/dutyCycle);
+                nextRoutingPacketTransmissionTime = simTime() + std::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl()/dutyCycle);
             }
             else {
                 // Update next routing packet transmission time
-                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
+                nextRoutingPacketTransmissionTime = simTime() + std::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
             }
         }
 
@@ -755,11 +768,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                     // Update duty cycle end
                     dutyCycleEnd = simTime() + txDuration/dutyCycle;
                     // Update next data packet transmission time, taking the duty cycle into account
-                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl()/dutyCycle);
+                    nextDataPacketTransmissionTime = simTime() + std::max(getTimeToNextDataPacket().dbl(), txDuration.dbl()/dutyCycle);
                 }
                 else {
                     // Update next data packet transmission time
-                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl());
+                    nextDataPacketTransmissionTime = simTime() + std::max(getTimeToNextDataPacket().dbl(), txDuration.dbl());
                 }
             }
             // or send forward packet
@@ -769,11 +782,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                     // Update duty cycle end
                     dutyCycleEnd = simTime() + txDuration/dutyCycle;
                     // Update next forward packet transmission time, taking the duty cycle into account
-                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl()/dutyCycle);
+                    nextForwardPacketTransmissionTime = simTime() + std::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl()/dutyCycle);
                 }
                 else {
                 // Update next forward packet transmission time
-                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl());
+                    nextForwardPacketTransmissionTime = simTime() + std::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl());
                 }
             }
         }
@@ -798,11 +811,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             nextScheduleTime = std::min(nextScheduleTime.dbl(), nextForwardPacketTransmissionTime.dbl());
         }
         // but, in any case, not earlier than simTime()+txDuration.
-        nextScheduleTime = math::max(nextScheduleTime.dbl(), simTime().dbl()+txDuration.dbl());
+    nextScheduleTime = std::max(nextScheduleTime.dbl(), simTime().dbl()+txDuration.dbl());
 
         // Take the duty cycle into account
         if (enforceDutyCycle) {
-            nextScheduleTime = math::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
         }
 
         // Last, although this should never happen, check the schedule time is in the future, otherwise just add a 1s delay
@@ -1449,7 +1462,7 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
             simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
 
             if (enforceDutyCycle) {
-                nextScheduleTime = math::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
             }
 
             if (! (nextScheduleTime > simTime()) ) {
@@ -2038,7 +2051,8 @@ void LoRaNodeApp::generateDataPackets() {
                 LoRaAppPacket *dataPacket = new LoRaAppPacket("DataPacket");
 
                 dataPacket->setMsgType(DATA);
-                dataPacket->setDataInt(currDataInt+k);
+                // Assign a unique, monotonically increasing sequence per packet
+                dataPacket->setDataInt(currDataInt++);
                 dataPacket->setSource(nodeId);
                 dataPacket->setVia(nodeId);
                 dataPacket->setDestination(destinations[j]);
@@ -2058,7 +2072,6 @@ void LoRaNodeApp::generateDataPackets() {
                 LoRaPacketsToSend.push_back(*dataPacket);
                 delete dataPacket;
             }
-            currDataInt++;
         }
     }
 }
@@ -2355,7 +2368,8 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
 
     int payloadBytes = frame->getByteLength()+8; //+8 bytes for headers
 
-    int payloadSymbNb = 8 + math::max(ceil((8*payloadBytes - 4*cInfo->getLoRaSF() + 28 + 16 - 20*0)/(4*(cInfo->getLoRaSF()-2*0)))*(cInfo->getLoRaCR() + 4), 0);
+    int payloadSymbNb = 8 + std::max( (int) std::ceil((8*payloadBytes - 4*cInfo->getLoRaSF() + 28 + 16 - 20*0)
+                                 /(4*(cInfo->getLoRaSF()-2*0))) * (cInfo->getLoRaCR() + 4), 0);
 
     simtime_t Theader = 0.5 * (8+payloadSymbNb) * Tsym / 1000;
     simtime_t Tpayload = 0.5 * (8+payloadSymbNb) * Tsym / 1000;
