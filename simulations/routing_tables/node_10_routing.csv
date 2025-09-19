@@ -1,0 +1,17 @@
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=11,via=11,metric=1,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=5,via=5,metric=1,validUntil=1409.7734938083,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=12,via=11,metric=2,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=16,via=11,metric=4,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=0,via=11,metric=3,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=13,via=11,metric=4,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=8,via=11,metric=6,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=3,via=11,metric=5,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=20,via=11,metric=6,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=19,via=11,metric=5,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=18,via=11,metric=6,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=17,via=11,metric=5,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=15,via=11,metric=4,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=14,via=11,metric=5,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=9,via=11,metric=6,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=7,via=11,metric=3,validUntil=1408.7913188328,sf=,priMetric=,secMetric=
+simTime=809.7734938083,event=routing_packet_processed,nodeId=10,metricType=ETX,tableSize=17,id=6,via=5,metric=2,validUntil=1409.7734938083,sf=,priMetric=,secMetric=
