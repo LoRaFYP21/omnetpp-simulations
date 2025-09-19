@@ -84,6 +84,15 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+        // AODV-lite controls
+        bool useAODV = default(false);
+        int selectedTxNodeId = default(-1); // -1 = auto
+        int selectedRxNodeId = default(-1); // -1 = auto
+        // Optional TTL override for AODV control packets (RREQ/RREP).
+        // If > 0, RREQ/RREP will use this value instead of packetTTL.
+        int aodvTtl = default(0);
+    // Optional global ID offset to avoid clashes across arrays
+    int idBase = default(0);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

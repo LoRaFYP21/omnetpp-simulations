@@ -33,6 +33,8 @@ enum AppPacketType
     TXCONFIG = 4;
     ACK = 5;
     ROUTING = 6;
+    RREQ = 7;
+    RREP = 8;
 }
 
 class LoRaOptions {
@@ -61,6 +63,7 @@ packet LoRaAppPacket {
     int destination;
     int ttl;
     int via;
+    int lastHop;
 	LoRaRoute routingTable[];
 	simtime_t departureTime;
 }

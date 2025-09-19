@@ -20,6 +20,7 @@
 #include <string>
 // CSV logging
 #include <fstream>
+#include <set>
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -76,6 +77,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void manageReceivedAckPacketToForward(cMessage *msg);
         void manageReceivedDataPacketToForward(cMessage *msg);
         void manageReceivedRoutingPacket(cMessage *msg);
+    // AODV-lite handlers
+    void handleRreq(cMessage *msg);
+    void handleRrep(cMessage *msg);
+    void maybeStartDiscoveryFor(int destId);
+    void sendRreq(int destId);
+    void sendRrep(int originId, int viaNextHop);
+    // AODV-lite transmit helpers
+    void enqueueAodvOrSend(LoRaAppPacket *pkt);
         std::pair<double,double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
         void sendJoinRequest();
         void sendDownMgmtPacket();
@@ -160,10 +169,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t nextRoutingPacketTransmissionTime;
         simtime_t nextDataPacketTransmissionTime;
         simtime_t nextForwardPacketTransmissionTime;
+    simtime_t nextAodvPacketTransmissionTime;
 
         bool dataPacketsDue;
         bool forwardPacketsDue;
         bool routingPacketsDue;
+    bool aodvPacketsDue = false;
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;
@@ -218,6 +229,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         //Routing variables
         int routingMetric;
         bool routeDiscovery;
+    bool inSelfHandler = false;
+    bool useAODV = false;
+    int selectedTxNodeId = -1;
+    int selectedRxNodeId = -1;
+    std::set<long long> seenRreqs; // key: (origin<<32)|rreqId
+    int rreqSeq = 0;
         int windowSize;
         simtime_t routeTimeout;
         bool storeBestRoutesOnly;
@@ -230,6 +247,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         //Node info
         int nodeId;
+    int idBase = 0;
 
         std::vector<int> neighbourNodes;
         std::vector<int> knownNodes;
@@ -238,6 +256,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         std::vector<LoRaAppPacket> LoRaPacketsToForward;
         std::vector<LoRaAppPacket> LoRaPacketsForwarded;
         std::vector<LoRaAppPacket> DataPacketsForMe;
+    // Pending AODV control packets (RREQ/RREP) to send when MAC is idle
+    std::vector<LoRaAppPacket> aodvPacketsToSend;
 
 
         //Application parameters

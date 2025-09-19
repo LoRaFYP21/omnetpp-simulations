@@ -104,17 +104,18 @@ void LoRaNodeApp::initialize(int stage) {
             double minY = host->par("minY");
             double sepY = host->par("sepY");
             int cols = int(sqrt(numberOfNodes));
+            int idx = getContainingNode(this)->getIndex();
             StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
                     host->getSubmodule("mobility"));
-            if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
+            if (idx == 0 && routingMetric == 0){ // end node 0 at middle
                 mobility->par("initialX").setDoubleValue(minX + sepX * (cols/2));
                 mobility->par("initialY").setDoubleValue(minY + sepY * (cols/2)+ uniform(0,100));
             }
             else{
                 mobility->par("initialX").setDoubleValue(
-                        minX + sepX * (nodeId % cols) + uniform(0,100));
+                        minX + sepX * (idx % cols) + uniform(0,100));
                 mobility->par("initialY").setDoubleValue(
-                        minY + sepY * ((int) nodeId / cols) + uniform(0,100));
+                        minY + sepY * ((int) idx / cols) + uniform(0,100));
             }
         } else {
             double minX = host->par("minX");
@@ -244,6 +245,11 @@ void LoRaNodeApp::initialize(int stage) {
         packetTTL = par("packetTTL");
         stopRoutingAfterDataDone = par("stopRoutingAfterDataDone");
 
+    // AODV-lite params
+    if (hasPar("useAODV")) useAODV = par("useAODV");
+    if (hasPar("selectedTxNodeId")) selectedTxNodeId = par("selectedTxNodeId");
+    if (hasPar("selectedRxNodeId")) selectedRxNodeId = par("selectedRxNodeId");
+
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
 
@@ -329,8 +335,10 @@ void LoRaNodeApp::initialize(int stage) {
     // Prepare routing CSV path (per-node file)
     openRoutingCsv();
 
-        //Node identifier
-        nodeId = getContainingNode(this)->getIndex();
+    //Node identifier (optionally offset to avoid collisions across arrays)
+    nodeId = getContainingNode(this)->getIndex();
+    if (hasPar("idBase")) idBase = par("idBase");
+    nodeId += idBase;
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -414,20 +422,24 @@ void LoRaNodeApp::initialize(int stage) {
         }
         generateDataPackets();
 
-        // Routing packets timer
-        timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
-        switch (routingMetric) {
-            // No routing packets are to be sent
-            case NO_FORWARDING:
-            case FLOODING_BROADCAST_SINGLE_SF:
-            case SMART_BROADCAST_SINGLE_SF:
-                break;
-            // Schedule selfRoutingPackets
-            default:
-                routingPacketsDue = true;
-                nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
-                EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
-                break;
+        // Routing packets timer (disabled when AODV mode is enabled)
+        if (!useAODV) {
+            timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
+            switch (routingMetric) {
+                // No routing packets are to be sent
+                case NO_FORWARDING:
+                case FLOODING_BROADCAST_SINGLE_SF:
+                case SMART_BROADCAST_SINGLE_SF:
+                    break;
+                // Schedule selfRoutingPackets
+                default:
+                    routingPacketsDue = true;
+                    nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
+                    EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
+                    break;
+            }
+        } else {
+            routingPacketsDue = false;
         }
 
         // Data packets timer
@@ -489,10 +501,11 @@ void LoRaNodeApp::initialize(int stage) {
 
 std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
     double radius, double centX, double centY) {
-    nodeId = getContainingNode(this)->getIndex();
+    // Do NOT overwrite member nodeId here; it may carry idBase offset for AODV.
+    int idx = getContainingNode(this)->getIndex();
     routingMetric = par("routingMetric");
 
-    if (nodeId == 0 && routingMetric == 0) // only for the end nodes and the packet originator
+    if (idx == 0 && routingMetric == 0) // only for the end nodes and the packet originator
     {
         // return std::make_pair(centX, centY);
         std::pair<double, double> coordValues = std::make_pair(centX, centY);
@@ -670,6 +683,8 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
 
 
 void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
+    // Guard to prevent double scheduling
+    inSelfHandler = true;
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
@@ -681,7 +696,8 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
         bool sendData = false;
         bool sendForward = false;
-        bool sendRouting = false;
+    bool sendRouting = false;
+    bool sendAodv = false;
 
         // Check if there are data packets to send, and if it is time to send them
         // TODO: Not using dataPacketsDue ???
@@ -695,9 +711,14 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             sendForward = true;
         }
 
-        // Check if there are routing packets to send
-        if ( routingPacketsDue && simTime() >= nextRoutingPacketTransmissionTime ) {
+        // Check if there are routing packets to send (disabled in AODV mode)
+        if ( !useAODV && routingPacketsDue && simTime() >= nextRoutingPacketTransmissionTime ) {
             sendRouting = true;
+        }
+
+        // AODV control packets due?
+        if (useAODV && aodvPacketsToSend.size() > 0) {
+            sendAodv = true;
         }
 
         // Now there could be between none and three types of packets due to be sent. Decide between routing and the
@@ -713,7 +734,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             }
         }
 
-        // Send routing packet
+    // Send routing packet
         if (sendRouting) {
             txDuration = sendRoutingPacket();
             if (enforceDutyCycle) {
@@ -726,6 +747,23 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                 // Update next routing packet transmission time
                 nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
             }
+        }
+
+        // Send AODV control first (small, unblock discovery), else data/forward
+        else if (sendAodv) {
+            LoRaAppPacket *ctrl = new LoRaAppPacket(aodvPacketsToSend.front());
+            aodvPacketsToSend.erase(aodvPacketsToSend.begin());
+            LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+            cInfo->setLoRaTP(loRaTP);
+            cInfo->setLoRaCF(loRaCF);
+            cInfo->setLoRaSF(loRaSF);
+            cInfo->setLoRaBW(loRaBW);
+            cInfo->setLoRaCR(loRaCR);
+            ctrl->setControlInfo(cInfo);
+            send(ctrl, "appOut");
+            // small tx duration estimate to pace scheduling
+            txDuration = 0.2; // conservative small value
+            aodvPacketsDue = (aodvPacketsToSend.size() > 0);
         }
 
         // Send data or forward packet
@@ -784,6 +822,10 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         if (routingPacketsDue) {
             nextScheduleTime = nextRoutingPacketTransmissionTime.dbl();
         }
+        if (aodvPacketsDue) {
+            // schedule soon for next AODV control
+            nextScheduleTime = nextScheduleTime == 0 ? (simTime() + 0.1) : std::min(nextScheduleTime.dbl(), (simTime() + 0.1).dbl());
+        }
         // then based on data packets, if they are to be scheduled earlier,
         if (dataPacketsDue) {
             nextScheduleTime = std::min(nextScheduleTime.dbl(), nextDataPacketTransmissionTime.dbl());
@@ -807,7 +849,8 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
         // Schedule a self message to send routing, data or forward packets. Since some calculations lose precision, add an extra delay
         // (10x simtime-resolution unit) to avoid timing conflicts in the LoRaMac layer when simulations last very long.
-        if (routingPacketsDue || dataPacketsDue || forwardPacketsDue) {
+        if (routingPacketsDue || dataPacketsDue || forwardPacketsDue || aodvPacketsDue) {
+            if (selfPacket->isScheduled()) cancelEvent(selfPacket);
             scheduleAt(nextScheduleTime + 10*simTimeResolution, selfPacket);
         }
 
@@ -839,14 +882,36 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     else {
         // Instead of doing scheduling almost immediately: scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
         // wait 20 microseconds, which is approx. the transmission time for 1 bit (SF7, 125 kHz, 4:5)
+        if (selfPacket->isScheduled()) cancelEvent(selfPacket);
         scheduleAt(simTime() + 0.00002, selfPacket);
     }
+
+    inSelfHandler = false;
 }
 
 void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
     receivedPackets++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+
+    // AODV-lite control handling
+    if (packet->getMsgType() == RREQ) {
+        handleRreq(packet);
+        delete msg;
+        return;
+    }
+    if (packet->getMsgType() == RREP) {
+        if (packet->getDestination() == nodeId || packet->getVia() == nodeId) {
+            handleRrep(packet);
+        } else {
+            EV_INFO << "AODV RREP rx but not for this node (via=" << packet->getVia()
+                    << ", dest=" << packet->getDestination() << ") at node=" << nodeId << ". Ignoring." << endl;
+            std::cout << "AODV RREP ignore node=" << nodeId << " via=" << packet->getVia()
+                      << " dest=" << packet->getDestination() << std::endl;
+        }
+        delete msg;
+        return;
+    }
 
     // Check if the packet is from this node (i.e., a packet that some
     // other node is broadcasting which we have happened to receive). We
@@ -917,6 +982,8 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
 
     // Check it actually is a routing message
+    if (packet->getMsgType() == RREQ) { handleRreq(packet); return; }
+    if (packet->getMsgType() == RREP) { handleRrep(packet); return; }
     if (packet->getMsgType() == ROUTING) {
 
         receivedRoutingPackets++;
@@ -1479,6 +1546,17 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             (LoRaPacketsToSend.size() > 0 && bernoulli(ownDataPriority))
             || (LoRaPacketsToSend.size() > 0 && LoRaPacketsToForward.size() == 0)) {
 
+        if (useAODV && routeDiscovery) {
+            sanitizeRoutingTable();
+            int destCheck = LoRaPacketsToSend.front().getDestination();
+            int routeIndexCheck = getBestRouteIndexTo(destCheck);
+            if (routeIndexCheck < 0) {
+                maybeStartDiscoveryFor(destCheck);
+                delete dataPacket;
+                return 0;
+            }
+        }
+
         bubble("Sending a local data packet!");
 
         // Name packets to ease tracking
@@ -1820,6 +1898,10 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
 
 simtime_t LoRaNodeApp::sendRoutingPacket() {
+    // In AODV mode, legacy periodic ROUTING packets are suppressed
+    if (useAODV) {
+        return 0;
+    }
 
     bool transmit = false;
     simtime_t txDuration = 0;
@@ -1947,29 +2029,34 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 
 void LoRaNodeApp::generateDataPackets() {
 
-    if (!onlyNode0SendsPackets || nodeId == 0) {
+    if ((selectedTxNodeId >= 0 && nodeId == selectedTxNodeId) ||
+        (selectedTxNodeId < 0 && (!onlyNode0SendsPackets || nodeId == 0))) {
         std::vector<int> destinations = { };
 
-        if (numberOfDestinationsPerNode == 0 )
-            numberOfDestinationsPerNode = numberOfNodes-1;
+        if (selectedRxNodeId >= 0) {
+            destinations.push_back(selectedRxNodeId);
+        } else {
+            if (numberOfDestinationsPerNode == 0 )
+                numberOfDestinationsPerNode = numberOfNodes-1;
 
-        while (destinations.size() < numberOfDestinationsPerNode
-                && numberOfNodes - 1 - destinations.size() > 0) {
+            while (destinations.size() < (size_t)numberOfDestinationsPerNode
+                    && numberOfNodes - 1 - (int)destinations.size() > 0) {
 
-            int destination = intuniform(0, numberOfNodes - 1);
+                int destination = intuniform(0, numberOfNodes - 1);
 
-            if (destination != nodeId) {
-                bool newDestination = true;
+                if (destination != nodeId) {
+                    bool newDestination = true;
 
-                for (int i = 0; i < destinations.size(); i++) {
-                    if (destination == destinations[i]) {
-                        newDestination = false;
-                        break;
+                    for (int i = 0; i < (int)destinations.size(); i++) {
+                        if (destination == destinations[i]) {
+                            newDestination = false;
+                            break;
+                        }
                     }
-                }
 
-                if (newDestination) {
-                    destinations.push_back(destination);
+                    if (newDestination) {
+                        destinations.push_back(destination);
+                    }
                 }
             }
         }
@@ -2342,5 +2429,208 @@ simtime_t LoRaNodeApp::getTimeToNextForwardPacket() {
 }
 
 
+
+// ---- AODV-lite helpers ----
+void LoRaNodeApp::maybeStartDiscoveryFor(int destId) {
+    sendRreq(destId);
+    if (!selfPacket->isScheduled()) scheduleAt(simTime() + 1, selfPacket);
+}
+
+void LoRaNodeApp::sendRreq(int destId) {
+    LoRaAppPacket *rreq = new LoRaAppPacket("RREQ");
+    int rreqId = ++rreqSeq;
+    long long key = ((long long)nodeId << 32) | (unsigned int)rreqId;
+    seenRreqs.insert(key);
+    rreq->setMsgType(RREQ);
+    rreq->setDataInt(rreqId);
+    rreq->setSource(nodeId);
+    rreq->setDestination(destId);
+    rreq->setVia(BROADCAST_ADDRESS);
+    rreq->setLastHop(nodeId);
+    int aodvTtl = hasPar("aodvTtl") ? (int)par("aodvTtl") : 0;
+    rreq->setTtl(aodvTtl > 0 ? aodvTtl : std::max(2, packetTTL));
+    rreq->getOptions().setAppACKReq(false);
+    rreq->setByteLength(8);
+    rreq->setDepartureTime(simTime());
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+    rreq->setControlInfo(cInfo);
+    EV_INFO << "AODV RREQ originate: src=" << nodeId
+            << " dest=" << destId
+            << " id=" << rreqId
+            << " ttl=" << rreq->getTtl() << endl;
+    std::cout << "AODV RREQ originate src=" << nodeId
+              << " dest=" << destId
+              << " id=" << rreqId
+              << " ttl=" << rreq->getTtl() << std::endl;
+    enqueueAodvOrSend(rreq);
+}
+
+void LoRaNodeApp::handleRreq(cMessage *msg) {
+    LoRaAppPacket *pkt = check_and_cast<LoRaAppPacket *>(msg);
+    EV_INFO << "AODV RREQ rx at node=" << nodeId
+            << " src=" << pkt->getSource()
+            << " dest=" << pkt->getDestination()
+            << " id=" << pkt->getDataInt()
+            << " ttl=" << pkt->getTtl()
+            << " lasthop=" << pkt->getLastHop() << endl;
+    std::cout << "AODV RREQ rx node=" << nodeId
+              << " src=" << pkt->getSource()
+              << " dest=" << pkt->getDestination()
+              << " id=" << pkt->getDataInt()
+              << " ttl=" << pkt->getTtl()
+              << " lh=" << pkt->getLastHop() << std::endl;
+    long long key = ((long long)pkt->getSource() << 32) | (unsigned int)pkt->getDataInt();
+    if (seenRreqs.find(key) != seenRreqs.end()) return;
+    seenRreqs.insert(key);
+
+    // Reverse route to origin via the neighbor we heard this packet from
+    singleMetricRoute rev{};
+    rev.id = pkt->getSource();
+    rev.via = pkt->getLastHop();
+    rev.metric = 1;
+    rev.valid = simTime() + routeTimeout;
+    if (storeBestRoutesOnly) addOrReplaceBestSingleRoute(rev); else singleMetricRoutingTable.push_back(rev);
+    EV_INFO << "AODV RREQ install reverse route: dest(origin)=" << rev.id << " via=" << rev.via << endl;
+
+    if (pkt->getDestination() == nodeId) {
+        int nextHopIndex = getBestRouteIndexTo(pkt->getSource());
+        int viaHop = (nextHopIndex >= 0) ? singleMetricRoutingTable[nextHopIndex].via : pkt->getLastHop();
+        EV_INFO << "AODV RREQ reached destination node=" << nodeId << ", sending RREP via=" << viaHop << endl;
+        std::cout << "AODV RREQ reached dest node=" << nodeId << ", RREP via=" << viaHop << std::endl;
+        sendRrep(pkt->getSource(), viaHop);
+        return;
+    }
+
+    if (pkt->getTtl() > 1) {
+        LoRaAppPacket *fwd = new LoRaAppPacket("RREQ");
+        fwd->setMsgType(RREQ);
+        fwd->setDataInt(pkt->getDataInt());
+        fwd->setSource(pkt->getSource());
+        fwd->setDestination(pkt->getDestination());
+        fwd->setVia(BROADCAST_ADDRESS);
+        fwd->setLastHop(nodeId);
+        fwd->setTtl(pkt->getTtl() - 1);
+        fwd->getOptions().setAppACKReq(false);
+        fwd->setByteLength(8);
+        fwd->setDepartureTime(simTime());
+        LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+        cInfo->setLoRaTP(loRaTP);
+        cInfo->setLoRaCF(loRaCF);
+        cInfo->setLoRaSF(loRaSF);
+        cInfo->setLoRaBW(loRaBW);
+        cInfo->setLoRaCR(loRaCR);
+    fwd->setControlInfo(cInfo);
+        EV_INFO << "AODV RREQ forward at node=" << nodeId
+                << " to broadcast, ttl now=" << fwd->getTtl() << endl;
+        std::cout << "AODV RREQ fwd node=" << nodeId
+                  << " ttl=" << fwd->getTtl() << std::endl;
+    enqueueAodvOrSend(fwd);
+    }
+}
+
+void LoRaNodeApp::sendRrep(int originId, int viaNextHop) {
+    LoRaAppPacket *rrep = new LoRaAppPacket("RREP");
+    rrep->setMsgType(RREP);
+    rrep->setSource(nodeId);
+    rrep->setDestination(originId);
+    rrep->setVia(viaNextHop);
+    rrep->setLastHop(nodeId);
+    int aodvTtl = hasPar("aodvTtl") ? (int)par("aodvTtl") : 0;
+    rrep->setTtl(aodvTtl > 0 ? aodvTtl : std::max(2, packetTTL));
+    rrep->getOptions().setAppACKReq(false);
+    rrep->setByteLength(8);
+    rrep->setDepartureTime(simTime());
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+    rrep->setControlInfo(cInfo);
+    EV_INFO << "AODV RREP send from node=" << nodeId
+            << " to origin=" << originId
+            << " via=" << viaNextHop
+            << " ttl=" << rrep->getTtl() << endl;
+    std::cout << "AODV RREP send node=" << nodeId
+              << " to=" << originId
+              << " via=" << viaNextHop
+              << " ttl=" << rrep->getTtl() << std::endl;
+    enqueueAodvOrSend(rrep);
+}
+
+void LoRaNodeApp::handleRrep(cMessage *msg) {
+    LoRaAppPacket *pkt = check_and_cast<LoRaAppPacket *>(msg);
+    EV_INFO << "AODV RREP rx at node=" << nodeId
+            << " src(dest)=" << pkt->getSource()
+            << " dest(origin)=" << pkt->getDestination()
+            << " ttl=" << pkt->getTtl()
+            << " lasthop=" << pkt->getLastHop() << endl;
+    std::cout << "AODV RREP rx node=" << nodeId
+              << " src=" << pkt->getSource()
+              << " dest=" << pkt->getDestination()
+              << " ttl=" << pkt->getTtl()
+              << " lh=" << pkt->getLastHop() << std::endl;
+    // Forward route to final destination (pkt->getSource()) via lastHop
+    singleMetricRoute fwd{};
+    fwd.id = pkt->getSource();
+    fwd.via = pkt->getLastHop();
+    fwd.metric = 1;
+    fwd.valid = simTime() + routeTimeout;
+    if (storeBestRoutesOnly) addOrReplaceBestSingleRoute(fwd); else singleMetricRoutingTable.push_back(fwd);
+
+    if (pkt->getDestination() == nodeId) {
+        EV_INFO << "AODV RREP reached origin at node=" << nodeId << ". Scheduling data send." << endl;
+        if (!selfPacket->isScheduled()) scheduleAt(simTime() + 0.5, selfPacket);
+        return;
+    }
+
+    if (pkt->getTtl() > 1) {
+        int nextHopIndex = getBestRouteIndexTo(pkt->getDestination());
+        if (nextHopIndex < 0) {
+            EV_INFO << "AODV RREP drop at node=" << nodeId << ": no reverse route to origin=" << pkt->getDestination() << endl;
+            std::cout << "AODV RREP drop node=" << nodeId << " no-reverse-route to=" << pkt->getDestination() << std::endl;
+            return;
+        }
+        int viaHop = singleMetricRoutingTable[nextHopIndex].via;
+
+        LoRaAppPacket *fwdR = new LoRaAppPacket("RREP");
+        fwdR->setMsgType(RREP);
+        fwdR->setSource(pkt->getSource());
+        fwdR->setDestination(pkt->getDestination());
+        fwdR->setVia(viaHop);
+        fwdR->setLastHop(nodeId);
+        fwdR->setTtl(pkt->getTtl() - 1);
+        fwdR->getOptions().setAppACKReq(false);
+        fwdR->setByteLength(8);
+        fwdR->setDepartureTime(simTime());
+        LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+        cInfo->setLoRaTP(loRaTP);
+        cInfo->setLoRaCF(loRaCF);
+        cInfo->setLoRaSF(loRaSF);
+        cInfo->setLoRaBW(loRaBW);
+        cInfo->setLoRaCR(loRaCR);
+        fwdR->setControlInfo(cInfo);
+        EV_INFO << "AODV RREP forward at node=" << nodeId << " via=" << viaHop << " ttl=" << fwdR->getTtl() << endl;
+        std::cout << "AODV RREP fwd node=" << nodeId << " via=" << viaHop << " ttl=" << fwdR->getTtl() << std::endl;
+        enqueueAodvOrSend(fwdR);
+    }
+}
+
+void LoRaNodeApp::enqueueAodvOrSend(LoRaAppPacket *pkt) {
+    LoRaMac *lrmc = (LoRaMac *)getParentModule()->getSubmodule("LoRaNic")->getSubmodule("mac");
+    if (lrmc->fsm.getState() == IDLE) {
+        send(pkt, "appOut");
+    } else {
+        aodvPacketsToSend.push_back(*pkt);
+        delete pkt;
+        aodvPacketsDue = true;
+        if (!selfPacket->isScheduled()) scheduleAt(simTime() + 0.05, selfPacket);
+    }
+}
 
 } //end namespace inet
