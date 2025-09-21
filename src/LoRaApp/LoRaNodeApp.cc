@@ -760,6 +760,8 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             cInfo->setLoRaBW(loRaBW);
             cInfo->setLoRaCR(loRaCR);
             ctrl->setControlInfo(cInfo);
+            EV_INFO << "AODV ctrl tx from queue at node=" << nodeId << " type=" << ctrl->getMsgType() << endl;
+            std::cout << "AODV ctrl tx node=" << nodeId << " type=" << ctrl->getMsgType() << std::endl;
             send(ctrl, "appOut");
             // small tx duration estimate to pace scheduling
             txDuration = 0.2; // conservative small value
@@ -2591,12 +2593,12 @@ void LoRaNodeApp::handleRrep(cMessage *msg) {
 
     if (pkt->getTtl() > 1) {
         int nextHopIndex = getBestRouteIndexTo(pkt->getDestination());
-        if (nextHopIndex < 0) {
-            EV_INFO << "AODV RREP drop at node=" << nodeId << ": no reverse route to origin=" << pkt->getDestination() << endl;
-            std::cout << "AODV RREP drop node=" << nodeId << " no-reverse-route to=" << pkt->getDestination() << std::endl;
+        int viaHop = (nextHopIndex >= 0) ? singleMetricRoutingTable[nextHopIndex].via : pkt->getLastHop();
+        if (viaHop == nodeId) {
+            EV_INFO << "AODV RREP drop at node=" << nodeId << ": next hop resolves to self" << endl;
+            std::cout << "AODV RREP drop node=" << nodeId << " via=self" << std::endl;
             return;
         }
-        int viaHop = singleMetricRoutingTable[nextHopIndex].via;
 
         LoRaAppPacket *fwdR = new LoRaAppPacket("RREP");
         fwdR->setMsgType(RREP);
