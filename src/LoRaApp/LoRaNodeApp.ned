@@ -75,6 +75,9 @@ simple LoRaNodeApp
         int packetsInSF = default(0);
         bool sendPacketsContinuously = default(false);
         bool onlyNode0SendsPackets = default(false);
+    // If true on a node, always send DATA to a specific destination id set by forcedDestinationId
+    bool forceSingleDestination = default(false);
+    int forcedDestinationId = default(-1);
         bool enforceDutyCycle = default(true);
         double dutyCycle = default(0.01);
         int numberOfDestinationsPerNode = default(1);
@@ -84,6 +87,8 @@ simple LoRaNodeApp
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
+    // When true, do not send proactive routing beacons; routes are discovered via AODV only
+    bool aodvOnly = default(false);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

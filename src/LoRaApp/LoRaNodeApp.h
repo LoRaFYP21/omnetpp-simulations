@@ -30,6 +30,8 @@
 #include "LoRaAppPacket_m.h"
 #include "LoRa/LoRaMacControlInfo_m.h"
 
+namespace aodv { class Rreq; class Rrep; }
+
 using namespace omnetpp;
 
 namespace inet {
@@ -77,6 +79,15 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void handleAodvPacket(cMessage *msg);
     void maybeStartDiscoveryFor(int destination);
     simtime_t sendAodvPacket();
+    // Log when an AODV RREQ reaches its destination (per-destination CSV)
+    void logRreqAtDestination(const aodv::Rreq* rreq);
+    // Safely (re)schedule selfPacket by cancelling if already scheduled
+    inline void scheduleSelfAt(simtime_t t) {
+        if (selfPacket) {
+            if (selfPacket->isScheduled()) cancelEvent(selfPacket);
+            scheduleAt(t, selfPacket);
+        }
+    }
         std::pair<double,double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
         void sendJoinRequest();
         void sendDownMgmtPacket();
@@ -94,6 +105,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         double dutyCycle;
         int numberOfDestinationsPerNode;
         int numberOfPacketsPerDestination;
+    // If enabled (via NED/ini), node 0 will always send to a fixed destination id
+    bool forceSingleDestination;
+    int forcedDestinationId;
+    // If true, do not send periodic routing packets; discover routes only via AODV
+    bool aodvOnly;
 
         int numberOfPacketsToForward;
 

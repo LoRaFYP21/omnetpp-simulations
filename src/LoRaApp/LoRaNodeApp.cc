@@ -14,11 +14,12 @@
 //
 #include <iostream>
 #include <algorithm>
+#include <fstream>
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
 #include "../LoRa/LoRaMac.h"
-#include "aodv/AodvLite_m.h"
+#include "../aodv/AodvLite_m.h"
 
 
 #include "inet/mobility/static/StationaryMobility.h"
@@ -186,7 +187,11 @@ void LoRaNodeApp::initialize(int stage) {
         enforceDutyCycle = par("enforceDutyCycle");
         dutyCycle = par("dutyCycle");
         numberOfDestinationsPerNode = par("numberOfDestinationsPerNode");
-        numberOfPacketsPerDestination = par("numberOfPacketsPerDestination");
+    numberOfPacketsPerDestination = par("numberOfPacketsPerDestination");
+    // Optional: force a single destination per node (primarily for node 0 in demos)
+    forceSingleDestination = par("forceSingleDestination");
+    forcedDestinationId = par("forcedDestinationId");
+    aodvOnly = par("aodvOnly");
 
         numberOfPacketsToForward = par("numberOfPacketsToForward");
 
@@ -406,20 +411,22 @@ void LoRaNodeApp::initialize(int stage) {
         }
         generateDataPackets();
 
-        // Routing packets timer
-        timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
-        switch (routingMetric) {
-            // No routing packets are to be sent
-            case NO_FORWARDING:
-            case FLOODING_BROADCAST_SINGLE_SF:
-            case SMART_BROADCAST_SINGLE_SF:
-                break;
-            // Schedule selfRoutingPackets
-            default:
-                routingPacketsDue = true;
-                nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
-                EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
-                break;
+        // Routing packets timer: suppress if AODV-only mode is enabled
+        if (!aodvOnly) {
+            timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
+            switch (routingMetric) {
+                case NO_FORWARDING:
+                case FLOODING_BROADCAST_SINGLE_SF:
+                case SMART_BROADCAST_SINGLE_SF:
+                    break;
+                default:
+                    routingPacketsDue = true;
+                    nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
+                    EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
+                    break;
+            }
+        } else {
+            routingPacketsDue = false;
         }
 
         // Data packets timer
@@ -446,31 +453,31 @@ void LoRaNodeApp::initialize(int stage) {
 
             // Only data packet due
             if (dataPacketsDue && !forwardPacketsDue && !routingPacketsDue) {
-                scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstDataPacket);
                 EV << "Self packet triggered by due data packet" << endl;
             }
             // Only forward packet due
             else if (routingPacketsDue && !dataPacketsDue && !forwardPacketsDue) {
-                scheduleAt(simTime() + timeToFirstRoutingPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstRoutingPacket);
                 EV << "Self packet triggered by due routing packet" << endl;
             }
             // Only routing packet due
             else if (forwardPacketsDue && !dataPacketsDue && !routingPacketsDue) {
-                scheduleAt(simTime() + timeToFirstForwardPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstForwardPacket);
                 EV << "Self packet triggered by due forward packet" << endl;
             }
             // Data packet due earlier
             else if (timeToFirstDataPacket < timeToFirstForwardPacket && timeToFirstDataPacket < timeToFirstRoutingPacket ) {
-                scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstDataPacket);
                 EV << "Self packet triggered by due data packet before other due packets" << endl;
             }
             // Forward packet due earlier
                 else if (timeToFirstForwardPacket < timeToFirstDataPacket && timeToFirstForwardPacket < timeToFirstRoutingPacket ) {
-                scheduleAt(simTime() + timeToFirstForwardPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstForwardPacket);
                 EV << "Self packet triggered by due forward packet before other due packets" << endl;
             }
             else {
-                scheduleAt(simTime() + timeToFirstRoutingPacket, selfPacket);
+                scheduleSelfAt(simTime() + timeToFirstRoutingPacket);
                 EV << "Self packet triggered by due routing packet before other due packets" << endl;
             }
         }
@@ -818,7 +825,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         // Schedule a self message to send routing, data or forward packets. Since some calculations lose precision, add an extra delay
         // (10x simtime-resolution unit) to avoid timing conflicts in the LoRaMac layer when simulations last very long.
         if (routingPacketsDue || dataPacketsDue || forwardPacketsDue || aodvPacketsDue) {
-            scheduleAt(nextScheduleTime + 10*simTimeResolution, selfPacket);
+            scheduleSelfAt(nextScheduleTime + 10*simTimeResolution);
         }
 
         if (!sendPacketsContinuously && routingPacketsDue) {
@@ -849,7 +856,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     else {
         // Instead of doing scheduling almost immediately: scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
         // wait 20 microseconds, which is approx. the transmission time for 1 bit (SF7, 125 kHz, 4:5)
-        scheduleAt(simTime() + 0.00002, selfPacket);
+    scheduleSelfAt(simTime() + 0.00002);
     }
 }
 
@@ -1584,9 +1591,9 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
         aodvSeenRreqs.insert(key);
 
-        // Install/refresh reverse route to RREQ origin via lastHop
+    // Install/refresh reverse route to RREQ origin via last hop
         int src = rreq->getSrcId();
-        int via = packet->getLastHop();
+    int via = packet->getLastHop();
         int idx = getRouteIndexInSingleMetricRoutingTable(src, via);
         if (idx < 0) {
             singleMetricRoute nr; nr.id = src; nr.via = via; nr.metric = 1; nr.valid = simTime() + routeTimeout;
@@ -1596,6 +1603,8 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
 
         if (rreq->getDstId() == nodeId) {
+            // Destination received an RREQ: log to CSV for this destination
+            logRreqAtDestination(rreq);
             // I'm the destination: send RREP back to source
             aodv::Rrep *innerRrep = new aodv::Rrep("RREP");
             innerRrep->setSrcId(src);           // originator
@@ -1653,14 +1662,14 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
             }
         }
-        if (!selfPacket->isScheduled() && (aodvPacketsDue || dataPacketsDue || forwardPacketsDue || routingPacketsDue)) {
-            scheduleAt(simTime(), selfPacket);
+        if (aodvPacketsDue || dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
+            scheduleSelfAt(simTime());
         }
     }
     else if (auto rrep = dynamic_cast<aodv::Rrep*>(inner)) {
-        // Install/refresh forward route to destination (RREP source) via lastHop
+    // Install/refresh forward route to destination (RREP source) via last hop
         int dest = rrep->getDstId(); // final destination of the path
-        int via = packet->getLastHop();
+    int via = packet->getLastHop();
         int idx = getRouteIndexInSingleMetricRoutingTable(dest, via);
         if (idx < 0) {
             singleMetricRoute nr; nr.id = dest; nr.via = via; nr.metric = 1; nr.valid = simTime() + routeTimeout;
@@ -1692,9 +1701,39 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
         }
 
-        if (!selfPacket->isScheduled() && (aodvPacketsDue || dataPacketsDue || forwardPacketsDue || routingPacketsDue)) {
-            scheduleAt(simTime(), selfPacket);
+        if (aodvPacketsDue || dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
+            scheduleSelfAt(simTime());
         }
+    }
+}
+
+// Append an AODV RREQ arrival to a per-destination CSV in simulations/delivered_packets
+void LoRaNodeApp::logRreqAtDestination(const aodv::Rreq* rreq) {
+    try {
+        char path[512];
+        sprintf(path, "simulations/delivered_packets/node_%d_rreq.csv", nodeId);
+        // Check if file exists
+        bool writeHeader = false;
+        {
+            std::ifstream check(path);
+            writeHeader = !check.good();
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) return;
+        if (writeHeader) {
+            out << "simTime,receiverNodeId,srcId,dstId,bcastId,hopCount,srcSeq" << std::endl;
+        }
+        out << simTime() << ","
+            << nodeId << ","
+            << rreq->getSrcId() << ","
+            << rreq->getDstId() << ","
+            << rreq->getBcastId() << ","
+            << rreq->getHopCount() << ","
+            << rreq->getSrcSeq()
+            << std::endl;
+        out.close();
+    } catch (...) {
+        // Ignore logging failures
     }
 }
 
@@ -1721,6 +1760,7 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
     if (cPacket *inner = out->getEncapsulatedPacket()) {
         if (dynamic_cast<aodv::Rreq*>(inner)) {
             out->setVia(BROADCAST_ADDRESS);
+            out->setLastHop(nodeId);
         } else if (dynamic_cast<aodv::Rrep*>(inner)) {
             int idx = getBestRouteIndexTo(out->getDestination());
             if (idx >= 0 && idx < (int)singleMetricRoutingTable.size()) {
@@ -1728,6 +1768,7 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
             } else {
                 out->setVia(BROADCAST_ADDRESS);
             }
+            out->setLastHop(nodeId);
         }
     }
 
@@ -1767,7 +1808,7 @@ void LoRaNodeApp::maybeStartDiscoveryFor(int destination) {
 
     aodvPacketsToSend.push_back(rreqEnv);
     aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
-    if (!selfPacket->isScheduled()) scheduleAt(simTime(), selfPacket);
+    scheduleSelfAt(simTime());
 }
 
 simtime_t LoRaNodeApp::sendForwardPacket() {
@@ -2049,8 +2090,13 @@ void LoRaNodeApp::generateDataPackets() {
         if (numberOfDestinationsPerNode == 0 )
             numberOfDestinationsPerNode = numberOfNodes-1;
 
-        while (destinations.size() < numberOfDestinationsPerNode
-                && numberOfNodes - 1 - destinations.size() > 0) {
+    // If configured, force a single known destination id (e.g., for node 0 demo)
+    if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+        destinations.push_back(forcedDestinationId);
+    }
+
+    while (destinations.size() < numberOfDestinationsPerNode
+        && numberOfNodes - 1 - destinations.size() > 0) {
 
             int destination = intuniform(0, numberOfNodes - 1);
 

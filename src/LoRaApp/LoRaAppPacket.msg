@@ -61,6 +61,8 @@ packet LoRaAppPacket {
     int destination;
     int ttl;
     int via;
+    // ID of the immediate previous hop that forwarded/transmitted this frame
+    int lastHop;
 	LoRaRoute routingTable[];
 	simtime_t departureTime;
 }
