@@ -335,15 +335,10 @@ void LoRaNodeApp::initialize(int stage) {
     // Prepare routing CSV path (per-node file)
     openRoutingCsv();
 
-<<<<<<< Updated upstream
     //Node identifier (optionally offset to avoid collisions across arrays)
     nodeId = getContainingNode(this)->getIndex();
     if (hasPar("idBase")) idBase = par("idBase");
     nodeId += idBase;
-=======
-        //Node identifier
-        nodeId = getContainingNode(this)->getIndex();
->>>>>>> Stashed changes
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -1255,58 +1250,36 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     }
 }
 
-<<<<<<< Updated upstream
 // Helper: keep only the best route per destination (single-metric tables)
 // Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
 void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
-    // Make a safe copy because we'll potentially erase from the vector
     LoRaNodeApp::singleMetricRoute cand = candidate;
-    // Find all entries for this destination id
     int bestIdx = -1;
     for (int i = 0; i < (int)singleMetricRoutingTable.size(); ++i) {
         if (singleMetricRoutingTable[i].id == candidate.id) {
-            if (bestIdx == -1) {
-                bestIdx = i;
-            } else {
-                // Determine if current i is better than current bestIdx
+            if (bestIdx == -1) bestIdx = i; else {
                 const auto &cur = singleMetricRoutingTable[i];
                 const auto &best = singleMetricRoutingTable[bestIdx];
-                if (cur.metric < best.metric ||
-                    (cur.metric == best.metric && cur.valid > best.valid)) {
+                if (cur.metric < best.metric || (cur.metric == best.metric && cur.valid > best.valid))
                     bestIdx = i;
-                }
             }
         }
     }
-
-    // Compare candidate against current best (if any)
     bool candidateIsBest = true;
     if (bestIdx != -1) {
         const auto &best = singleMetricRoutingTable[bestIdx];
-        if (best.metric < cand.metric ||
-            (best.metric == cand.metric && best.valid >= cand.valid)) {
+        if (best.metric < cand.metric || (best.metric == cand.metric && best.valid >= cand.valid))
             candidateIsBest = false;
-        }
     }
-
     if (candidateIsBest) {
-        // Remove all routes to this destination, then insert candidate
         for (auto it = singleMetricRoutingTable.begin(); it != singleMetricRoutingTable.end(); ) {
             if (it->id == cand.id) it = singleMetricRoutingTable.erase(it); else ++it;
         }
         singleMetricRoutingTable.push_back(cand);
     } else {
-        // Candidate is worse; if there is no entry for this destination yet, insert it, else ignore
-        if (bestIdx == -1) {
-            singleMetricRoutingTable.push_back(cand);
-            // Now reduce to one (candidate is the only one)
-        }
-        // else do nothing (keep the existing best)
+        if (bestIdx == -1) singleMetricRoutingTable.push_back(cand);
     }
 }
-
-=======
->>>>>>> Stashed changes
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1331,15 +1304,10 @@ void LoRaNodeApp::openRoutingCsv() {
 
 void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     if (!routingCsvReady) return;
-    // Open file in truncate mode to reflect current snapshot
     routingCsv.open(routingCsvPath, std::ios::out | std::ios::trunc);
     if (!routingCsv.is_open()) return;
-<<<<<<< Updated upstream
-    // Write rows in key=value format for readability
-=======
-    // Write header each time
     routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
->>>>>>> Stashed changes
+
     const char *metricName = nullptr;
     switch (routingMetric) {
         case NO_FORWARDING: metricName = "NO_FORWARDING"; break;
@@ -1353,50 +1321,18 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
         case TIME_ON_AIR_SF_CAD_SF: metricName = "TOA"; break;
         default: metricName = "UNKNOWN"; break;
     }
-    // Single-metric table
+
     for (const auto &r : singleMetricRoutingTable) {
-<<<<<<< Updated upstream
-        routingCsv << "simTime=" << simTime()
-                   << ",event=" << eventName
-                   << ",nodeId=" << nodeId
-                   << ",metricType=" << metricName
-                   << ",tableSize=" << singleMetricRoutingTable.size()
-                   << ",id=" << r.id
-                   << ",via=" << r.via
-                   << ",metric=" << r.metric
-                   << ",validUntil=" << r.valid
-                   << ",sf="
-                   << ",priMetric="
-                   << ",secMetric="
-=======
         routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
                    << ',' << singleMetricRoutingTable.size()
                    << ',' << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid
-                   << ",,,"  // placeholders for dual-metric columns
->>>>>>> Stashed changes
-                   << std::endl;
+                   << ",,," << std::endl;
     }
-    // Dual-metric table
     for (const auto &r : dualMetricRoutingTable) {
-<<<<<<< Updated upstream
-        routingCsv << "simTime=" << simTime()
-                   << ",event=" << eventName
-                   << ",nodeId=" << nodeId
-                   << ",metricType=" << metricName
-                   << ",tableSize=" << dualMetricRoutingTable.size()
-                   << ",id=" << r.id
-                   << ",via=" << r.via
-                   << ",metric="
-                   << ",validUntil=" << r.valid
-                   << ",sf=" << r.sf
-                   << ",priMetric=" << r.priMetric
-                   << ",secMetric=" << r.secMetric
-=======
         routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
                    << ',' << dualMetricRoutingTable.size()
                    << ',' << r.id << ',' << r.via << ",," << r.valid
                    << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric
->>>>>>> Stashed changes
                    << std::endl;
     }
     routingCsv.flush();

@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<scave:Analysis xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:scave="http://www.omnetpp.org/omnetpp/scave">
-  <inputs>
-    <inputs name="/flora-ucami2019-extension/results/LoRaMesh-s0.ini.vec"/>
-    <inputs name="/flora-ucami2019-extension/results/LoRaMesh-s0.ini.sca"/>
-  </inputs>
-  <datasets/>
-  <chartSheets/>
-</scave:Analysis>

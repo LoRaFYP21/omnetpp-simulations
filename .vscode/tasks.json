@@ -1,0 +1,25 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build OMNeT++ project",
+			"type": "shell",
+			"command": "cmd /c \"setlocal EnableDelayedExpansion & if exist makefrag ( set MAKE=mingw32-make ) else ( set MAKE=make ) & if exist Makefile.vc ( nmake /f Makefile.vc ) else ( !MAKE! -j %NUMBER_OF_PROCESSORS% )\"",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build OMNeT++ project",
+			"type": "shell",
+			"command": "cmd /c \"setlocal EnableDelayedExpansion ^& if exist makefrag ( set MAKE=mingw32-make ) else ( set MAKE=make ) ^& if exist Makefile.vc ( nmake /f Makefile.vc ) else ( !MAKE! -j %NUMBER_OF_PROCESSORS% )\"",
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		}
+	]
+}
