@@ -20,7 +20,10 @@
 #include <string>
 // CSV logging
 #include <fstream>
+<<<<<<< Updated upstream
 #include <set>
+=======
+>>>>>>> Stashed changes
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"

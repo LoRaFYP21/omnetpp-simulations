@@ -41,4 +41,5 @@ simulations/**/.tkenvrc
 simulations/**/valgrind.out
 simulations/**/log.txt
 
-
+*.csv
+simulations/routing_tables/*.csv
