@@ -1605,8 +1605,6 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
 
         // Track first-seen parent per-origin for this discovery wave
-        int src = rreq->getSrcId();
-        int via = packet->getLastHop();
         auto bIt = aodvReverseBcastId.find(src);
         if (bIt == aodvReverseBcastId.end() || bIt->second < rreq->getBcastId()) {
             // New discovery wave, reset parent

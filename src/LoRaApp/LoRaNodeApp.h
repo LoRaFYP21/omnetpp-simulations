@@ -258,6 +258,9 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::set<int> aodvDiscoveryInProgress;        // destinations currently discovering
     std::map<int, std::vector<LoRaAppPacket>> aodvBufferedData; // dest -> buffered DATA frames
     int aodvRreqSeq = 0;
+    // Reverse path mapping: first-seen parent per origin; and last seen bcastId per origin
+    std::map<int,int> aodvReverseParent;          // srcId -> parent (first RREQ hop)
+    std::map<int,int> aodvReverseBcastId;         // srcId -> last seen bcastId
 
 
         //Application parameters
