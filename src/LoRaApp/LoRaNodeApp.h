@@ -18,6 +18,8 @@
 
 #include <omnetpp.h>
 #include <string>
+#include <set>
+#include <map>
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -71,6 +73,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void manageReceivedAckPacketToForward(cMessage *msg);
         void manageReceivedDataPacketToForward(cMessage *msg);
         void manageReceivedRoutingPacket(cMessage *msg);
+    // AODV-lite helpers
+    void handleAodvPacket(cMessage *msg);
+    void maybeStartDiscoveryFor(int destination);
+    simtime_t sendAodvPacket();
         std::pair<double,double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
         void sendJoinRequest();
         void sendDownMgmtPacket();
@@ -153,6 +159,9 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         bool dataPacketsDue;
         bool forwardPacketsDue;
         bool routingPacketsDue;
+    // AODV scheduling
+    bool aodvPacketsDue = false;
+    simtime_t nextAodvPacketTransmissionTime;
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;
@@ -227,6 +236,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         std::vector<LoRaAppPacket> LoRaPacketsToForward;
         std::vector<LoRaAppPacket> LoRaPacketsForwarded;
         std::vector<LoRaAppPacket> DataPacketsForMe;
+    // AODV queues and state
+    std::vector<LoRaAppPacket> aodvPacketsToSend; // holds RREQ/RREP to transmit
+    std::set<long long> aodvSeenRreqs;            // key = (src<<32) | rreqSeq
+    std::set<int> aodvDiscoveryInProgress;        // destinations currently discovering
+    std::map<int, std::vector<LoRaAppPacket>> aodvBufferedData; // dest -> buffered DATA frames
+    int aodvRreqSeq = 0;
 
 
         //Application parameters
