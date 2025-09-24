@@ -1,22 +1,23 @@
-// Minimal AODV-lite control packets used by LoRaNodeApp
-// Generates aodv::Rreq and aodv::Rrep message classes
+// AODV-lite control messages for LoRaMesh
+// Defines RREQ and RREP packets used by LoRaNodeApp AODV logic
 
 namespace aodv;
 
 packet Rreq {
-    int srcId;
-    int dstId;
-    int srcSeq;
-    int dstSeq;
-    int hopCount;
-    int bcastId;
-    int ttl;
+	int srcId;        // Originator of the request
+	int dstId;        // Target destination
+	int srcSeq;       // Originator sequence number
+	int dstSeq;       // Destination sequence number (optional)
+	int hopCount;     // Hop count from origin
+	int bcastId;      // Broadcast ID to suppress duplicates
+	int ttl;          // Time-to-live for propagation control
 }
 
 packet Rrep {
-    int srcId;      // originator id
-    int dstId;      // destination id
-    int dstSeq;
-    int hopCount;
-    double lifetime;
+	int srcId;        // Originator of the original RREQ
+	int dstId;        // Destination node ID for the route
+	int dstSeq;       // Destination sequence number (optional)
+	int hopCount;     // Hop count back to the originator
+	double lifetime;  // Route validity duration (seconds)
 }
+

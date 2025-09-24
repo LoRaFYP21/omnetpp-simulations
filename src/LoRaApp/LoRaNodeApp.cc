@@ -1584,10 +1584,12 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
     cPacket *inner = packet->getEncapsulatedPacket();
     if (auto rreq = dynamic_cast<aodv::Rreq*>(inner)) {
-        // Duplicate suppression based on (src, seq=dataInt)
+        // Duplicate suppression based on (src, bcastId)
         long long key = (static_cast<long long>(rreq->getSrcId()) << 32) | (static_cast<unsigned int>(rreq->getBcastId()));
         if (aodvSeenRreqs.count(key)) {
-            return; // drop duplicate silently
+            EV << "AODV: Drop duplicate RREQ src=" << rreq->getSrcId() << " bcastId=" << rreq->getBcastId() << " at node " << nodeId << endl;
+            bubble("Drop duplicate RREQ");
+            return; // drop duplicate
         }
         aodvSeenRreqs.insert(key);
 
@@ -1602,10 +1604,28 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
         }
 
+        // Track first-seen parent per-origin for this discovery wave
+        int src = rreq->getSrcId();
+        int via = packet->getLastHop();
+        auto bIt = aodvReverseBcastId.find(src);
+        if (bIt == aodvReverseBcastId.end() || bIt->second < rreq->getBcastId()) {
+            // New discovery wave, reset parent
+            aodvReverseBcastId[src] = rreq->getBcastId();
+            aodvReverseParent[src] = via;
+        } else if (bIt->second == rreq->getBcastId()) {
+            // Same wave: keep only the first parent; ignore competing first-hops
+            if (aodvReverseParent.find(src) == aodvReverseParent.end()) {
+                aodvReverseParent[src] = via;
+            }
+        }
+
         if (rreq->getDstId() == nodeId) {
             // Destination received an RREQ: log to CSV for this destination
             logRreqAtDestination(rreq);
             // I'm the destination: send RREP back to source
+            int parent = aodvReverseParent.count(src) ? aodvReverseParent[src] : via;
+            EV << "AODV: DEST received first RREQ from src=" << src << ", replying via parent=" << parent << endl;
+            bubble("RREP via first-seen parent");
             aodv::Rrep *innerRrep = new aodv::Rrep("RREP");
             innerRrep->setSrcId(src);           // originator
             innerRrep->setDstId(nodeId);        // destination (me)
@@ -1618,35 +1638,14 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             rrepEnv.setMsgType(ROUTING);
             rrepEnv.setSource(nodeId);
             rrepEnv.setDestination(src);
-            rrepEnv.setVia(via); // towards origin
+            rrepEnv.setVia(parent); // strictly via recorded first parent
             rrepEnv.setLastHop(nodeId);
             rrepEnv.setTtl(packetTTL);
             rrepEnv.encapsulate(innerRrep);
             aodvPacketsToSend.push_back(rrepEnv);
             aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
         } else {
-            // Intermediate: if I know a route to dest, send RREP to source as well
-            int dest = rreq->getDstId();
-            if (getBestRouteIndexTo(dest) >= 0) {
-                aodv::Rrep *innerRrep = new aodv::Rrep("RREP");
-                innerRrep->setSrcId(src);      // originator id
-                innerRrep->setDstId(dest);     // actual destination
-                innerRrep->setDstSeq(0);
-                innerRrep->setHopCount(0);
-                innerRrep->setLifetime(routeTimeout.dbl());
-                innerRrep->setByteLength(12);
-
-                LoRaAppPacket rrepEnv("AODV-RREP");
-                rrepEnv.setMsgType(ROUTING);
-                rrepEnv.setSource(nodeId);
-                rrepEnv.setDestination(src);
-                rrepEnv.setVia(via);
-                rrepEnv.setLastHop(nodeId);
-                rrepEnv.setTtl(packetTTL);
-                rrepEnv.encapsulate(innerRrep);
-                aodvPacketsToSend.push_back(rrepEnv);
-                aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
-            }
+            // Intermediate: DO NOT send RREP; only destination replies
             // Forward RREQ if TTL allows
             if (packet->getTtl() > 1) {
                 LoRaAppPacket fwd = *packet; // copy envelope and its encapsulated AODV
@@ -1658,6 +1657,7 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                     fwdInner->setHopCount(fwdInner->getHopCount()+1);
                     fwdInner->setTtl(std::max(0, fwdInner->getTtl()-1));
                 }
+                EV << "AODV: Forward RREQ (ttl=" << fwd.getTtl() << ") from node " << nodeId << endl;
                 aodvPacketsToSend.push_back(fwd);
                 aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
             }
@@ -1667,6 +1667,13 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
     }
     else if (auto rrep = dynamic_cast<aodv::Rrep*>(inner)) {
+        // Only the intended next hop should process/forward this RREP.
+        // Accept if I'm the final destination (original source of RREQ), otherwise require via==nodeId.
+        if (packet->getDestination() != nodeId && packet->getVia() != nodeId) {
+            EV << "AODV: Drop RREP not for me (via=" << packet->getVia() << ", dest=" << packet->getDestination() << ") at node " << nodeId << endl;
+            bubble("Drop RREP not for me");
+            return; // not for me to forward
+        }
     // Install/refresh forward route to destination (RREP source) via last hop
         int dest = rrep->getDstId(); // final destination of the path
     int via = packet->getLastHop();
@@ -1689,16 +1696,27 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 dataPacketsDue = true;
             }
         } else if (packet->getTtl() > 1) {
-            // Forward RREP towards original source
+            // Forward RREP towards original source strictly along reverse path
             LoRaAppPacket fwd = *packet;
             fwd.setTtl(packet->getTtl()-1);
             fwd.setLastHop(nodeId);
-            // update inner hop count
-            if (auto fwdInner = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket())) {
-                fwdInner->setHopCount(fwdInner->getHopCount()+1);
+            // choose reverse next hop from routing table (installed on RREQ)
+            int revIdx = getBestRouteIndexTo(fwd.getDestination());
+            if (revIdx >= 0) {
+                fwd.setVia(singleMetricRoutingTable[revIdx].via);
+                // update inner hop count
+                if (auto fwdInner = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket())) {
+                    fwdInner->setHopCount(fwdInner->getHopCount()+1);
+                }
+                EV << "AODV: Forward RREP unicast to via=" << fwd.getVia() << " at node " << nodeId << endl;
+                bubble("Fwd RREP unicast");
+                aodvPacketsToSend.push_back(fwd);
+                aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
+            } else {
+                // No reverse route known: drop instead of broadcasting
+                EV << "AODV: Drop RREP (no reverse route) at node " << nodeId << endl;
+                bubble("Drop RREP (no reverse route)");
             }
-            aodvPacketsToSend.push_back(fwd);
-            aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
         }
 
         if (aodvPacketsDue || dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
@@ -1762,11 +1780,17 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
             out->setVia(BROADCAST_ADDRESS);
             out->setLastHop(nodeId);
         } else if (dynamic_cast<aodv::Rrep*>(inner)) {
-            int idx = getBestRouteIndexTo(out->getDestination());
-            if (idx >= 0 && idx < (int)singleMetricRoutingTable.size()) {
-                out->setVia(singleMetricRoutingTable[idx].via);
-            } else {
-                out->setVia(BROADCAST_ADDRESS);
+            // Preserve via if already set; otherwise pick reverse path; never broadcast RREPs
+            if (out->getVia() == BROADCAST_ADDRESS) {
+                int idx = getBestRouteIndexTo(out->getDestination());
+                if (idx >= 0 && idx < (int)singleMetricRoutingTable.size()) {
+                    out->setVia(singleMetricRoutingTable[idx].via);
+                } else {
+                    // No known reverse path; abort sending this control packet
+                    delete out;
+                    aodvPacketsDue = !aodvPacketsToSend.empty();
+                    return 0;
+                }
             }
             out->setLastHop(nodeId);
         }

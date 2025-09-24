@@ -61,7 +61,7 @@ packet LoRaAppPacket {
     int destination;
     int ttl;
     int via;
-    // ID of the immediate previous hop that forwarded/transmitted this frame
+    // Previous hop that forwarded this envelope (used by AODV to install routes)
     int lastHop;
 	LoRaRoute routingTable[];
 	simtime_t departureTime;
