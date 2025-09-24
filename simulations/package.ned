@@ -5,6 +5,7 @@ import inet.node.inet.Router;
 import inet.node.internetcloud.InternetCloud;
 import loranetwork.LoRaPhy.LoRaMedium;
 import loranetwork.LoraNode.LoRaNode;
+import loranetwork.LoraNode.endRescueNode;
 //import loranetwork.LoraNode.endNode;
 import loranetwork.LoraNode.LoRaGW;
 import inet.node.inet.StandardHost;
@@ -164,6 +165,7 @@ network LoRaMesh
     parameters:
         int numberOfNodes = default(1);
         int numberOfEndNodes = default(1);
+        int numberOfRescueNodes = default(0);
         //        int numberOfEndNodes = default(1);
         int numberOfGateways = default(1);
         int networkSizeX = default(1400);
@@ -190,6 +192,10 @@ network LoRaMesh
 
         loRaEndNodes[numberOfEndNodes]: LoRaNode {
             @display("i=device/receiverdish;p=71,174;is=n");
+        }
+
+        loRaRescueNodes[numberOfRescueNodes]: endRescueNode {
+            @display("i=device/wifilaptop;p=200,174;is=n");
         }
 
         loRaGW[numberOfGateways]: LoRaGW {
