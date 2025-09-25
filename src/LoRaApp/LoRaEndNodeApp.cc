@@ -58,22 +58,22 @@ void LoRaEndNodeApp::initialize(int stage) {
         cModule *host = getContainingNode(this);
 
         // Generate random location for nodes if circle deployment type
-        if (strcmp(host->par("deploymentType").stringValue(), "circle") == 0) {
-            coordsValues = generateUniformCircleCoordinates(
-                    host->par("maxGatewayDistance").doubleValue(),
-                    host->par("gatewayX").doubleValue(),
-                    host->par("gatewayY").doubleValue());
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
-            mobility->par("initialX").setDoubleValue(coordsValues.first);
-            mobility->par("initialY").setDoubleValue(coordsValues.second);
+    if (strcmp(host->par("deploymentType").stringValue(), "circle") == 0) {
+        coordsValues = generateUniformCircleCoordinates(
+            host->par("maxGatewayDistance").doubleValue(),
+            host->par("gatewayX").doubleValue(),
+            host->par("gatewayY").doubleValue());
+        cModule *mobMod = host->getSubmodule("mobility");
+        if (mobMod) {
+        if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(coordsValues.first);
+        if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(coordsValues.second);
+        }
         } else if (strcmp(host->par("deploymentType").stringValue(), "edges")== 0) {
             double minX = host->par("minX");
             double maxX = host->par("maxX");
             double minY = host->par("minY");
             double maxY = host->par("maxY");
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
+        cModule *mobMod = host->getSubmodule("mobility");
 //            if (strcmp(host->par("deploymentType").stringValue(), "circle")==0) {
 //                       coordsValues = generateUniformCircleCoordinates(host->par("maxGatewayDistance").doubleValue(), host->par("gatewayX").doubleValue(), host->par("gatewayY").doubleValue());
 //                       StationaryMobility *mobility = check_and_cast<StationaryMobility *>(host->getSubmodule("mobility"));
@@ -81,22 +81,25 @@ void LoRaEndNodeApp::initialize(int stage) {
 //                       mobility->par("initialY").setDoubleValue(coordsValues.second);
 //                    }
 
-            mobility->par("initialX").setDoubleValue(
-                    minX + maxX * (((nodeId + 1) % 4 / 2) % 2));
-            mobility->par("initialY").setDoubleValue(
-                    minY + maxY * (((nodeId) % 4 / 2) % 2));
+        if (mobMod) {
+        double newX = minX + maxX * (((nodeId + 1) % 4 / 2) % 2);
+        double newY = minY + maxY * (((nodeId) % 4 / 2) % 2);
+        if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(newX);
+        if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(newY);
+        }
         } else if (strcmp(host->par("deploymentType").stringValue(), "grid") == 0) {
             double minX = host->par("minX");
             double sepX = host->par("sepX");
             double minY = host->par("minY");
             double sepY = host->par("sepY");
             int cols = int(sqrt(numberOfEndNodes));
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
-            mobility->par("initialX").setDoubleValue(
-                    minX + sepX * (nodeId % cols));
-            mobility->par("initialY").setDoubleValue(
-                    minY + sepY * ((int) nodeId / cols));
+        cModule *mobMod2 = host->getSubmodule("mobility");
+        if (mobMod2) {
+        double newX = minX + sepX * (nodeId % cols);
+        double newY = minY + sepY * ((int) nodeId / cols);
+        if (mobMod2->hasPar("initialX")) mobMod2->par("initialX").setDoubleValue(newX);
+        if (mobMod2->hasPar("initialY")) mobMod2->par("initialY").setDoubleValue(newY);
+        }
         } else {
             double minX = host->par("minX");
             double maxX = host->par("maxX");
@@ -105,10 +108,11 @@ void LoRaEndNodeApp::initialize(int stage) {
             double inix = host->par("initialX");
             double iniy = host->par("initialY");
             bool end = host->par("iAmEnd");
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                                host->getSubmodule("mobility"));
-            mobility->par("initialX").setDoubleValue(inix);
-            mobility->par("initialY").setDoubleValue(iniy);
+            cModule *mobMod3 = host->getSubmodule("mobility");
+            if (mobMod3) {
+                if (mobMod3->hasPar("initialX")) mobMod3->par("initialX").setDoubleValue(inix);
+                if (mobMod3->hasPar("initialY")) mobMod3->par("initialY").setDoubleValue(iniy);
+            }
         }
     } else if (stage == INITSTAGE_APPLICATION_LAYER) {
         bool isOperational;
@@ -441,11 +445,16 @@ std::pair<double, double> LoRaEndNodeApp::generateUniformCircleCoordinates(
 
 void LoRaEndNodeApp::finish() {
     cModule *host = getContainingNode(this);
-    StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-            host->getSubmodule("mobility"));
-    Coord coord = mobility->getCurrentPosition();
-    recordScalar("positionX", coord.x);
-    recordScalar("positionY", coord.y);
+    Coord coord;
+    if (auto mobMod = host->getSubmodule("mobility")) {
+        if (auto mobIface = dynamic_cast<inet::IMobility *>(mobMod)) {
+            coord = mobIface->getCurrentPosition();
+        } else if (mobMod->hasPar("initialX") && mobMod->hasPar("initialY")) {
+            coord = Coord(mobMod->par("initialX").doubleValue(), mobMod->par("initialY").doubleValue(), 0);
+        }
+        recordScalar("positionX", coord.x);
+        recordScalar("positionY", coord.y);
+    }
     recordScalar("finalTP", loRaTP);
     recordScalar("finalSF", loRaSF);
 
@@ -2092,4 +2101,5 @@ simtime_t LoRaEndNodeApp::getTimeToNextForwardPacket() {
 
 
 } //end namespace inet
+
 
