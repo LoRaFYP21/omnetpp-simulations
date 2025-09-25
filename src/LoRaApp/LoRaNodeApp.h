@@ -87,7 +87,17 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
 
+        // Failure simulation helpers
+        void scheduleFailure();
+        void performFailure();
+        bool failed = false;
+        cMessage *failureEvent = nullptr;
+        simtime_t failureTime = -1;
+        double failureJitterFracParam = 0;
+        simtime_t timeToFailureParam = -1;
+
         simtime_t calculateTransmissionDuration(cMessage *msg);
+
 
     // Routing table CSV logging helpers
     void openRoutingCsv();
@@ -95,6 +105,21 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // Delivery logging helpers
     void openDeliveredCsv();
     void logDeliveredPacket(const LoRaAppPacket *packet);
+
+    // Global failure subset (shared across instances)
+    static bool globalFailureInitialized;        // whether subset was chosen
+    static std::vector<int> globalFailingNodes;  // chosen node indices
+    static int globalFailureSubsetCountParam;    // cached param
+    static double globalFailureStartTimeParam; // cached (seconds)
+    static double globalFailureExpMeanParam;   // cached mean (seconds)
+    static int globalTotalNodesObserved;          // track highest node index+1 seen
+    void initGlobalFailureSelection();            // choose subset if needed
+
+    // Routing table CSV logging helpers
+    void openRoutingCsv();
+    void logRoutingSnapshot(const char *eventName);
+    void exportRoutingTables(); // export routing tables at finish
+
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
@@ -294,10 +319,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::ofstream routingCsv;
     bool routingCsvReady = false;
     std::string routingCsvPath;
+
     // Delivered packets CSV state
     std::ofstream deliveredCsv;
     bool deliveredCsvReady = false;
     std::string deliveredCsvPath;
+
 
 
         /**
