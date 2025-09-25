@@ -31,6 +31,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument('--results', default='results')
     ap.add_argument('--out', default='analysis')
+    ap.add_argument('--keep-duplicates', action='store_true', help='Do not deduplicate failureTime scalars')
     return ap.parse_args()
 
 def read_failures_from_csv(path):
@@ -101,12 +102,25 @@ def main():
         print('No failures detected.')
         return
 
+    # Deduplicate: same (rep,node,time) may appear more than once from multiple scalar sources
+    dedup = []
+    seen = set()
+    dropped = 0
+    for node, t, rep in failures:
+        key = (rep, node, round(t, 9))
+        if not args.keep_duplicates and key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        dedup.append((node, t, rep))
+
     # Group by repetition
     by_rep = defaultdict(list)
-    for node, t, rep in failures:
+    for node, t, rep in dedup:
         by_rep[rep].append((node,t))
 
-    with open(os.path.join(args.out,'random_failure_stats.txt'),'w') as stats:
+    stats_path = os.path.join(args.out,'random_failure_stats.txt')
+    with open(stats_path,'w') as stats:
         for rep in sorted(by_rep.keys()):
             stats.write(f'REPETITION {rep}\n')
             series = sorted(by_rep[rep], key=lambda x: x[1])
@@ -153,6 +167,9 @@ def main():
                 kmf.write('time,survival\n')
                 for t,s in km:
                     kmf.write(f'{t:.6f},{s:.6f}\n')
+    if dropped>0 and not args.keep_duplicates:
+        with open(stats_path,'a') as stats:
+            stats.write(f'Done.\n')
     print('Random failure analysis complete. See analysis/ outputs.')
 
 if __name__ == '__main__':

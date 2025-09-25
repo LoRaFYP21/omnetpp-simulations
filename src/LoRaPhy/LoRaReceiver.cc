@@ -15,6 +15,7 @@
 
 #include "LoRaReceiver.h"
 #include "inet/physicallayer/analogmodel/packetlevel/ScalarNoise.h"
+#include "LoRaApp/LoRaEndNodeApp.h"
 
 namespace inet {
 
@@ -68,10 +69,19 @@ bool LoRaReceiver::computeIsReceptionPossible(const IListening *listening, const
         return true;
     }
     else {
-        LoRaNodeApp *loRaApp = check_and_cast<LoRaNodeApp *>(getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp"));
-        if ( (loRaTransmission->getLoRaCF() == loRaApp->loRaCF && loRaTransmission->getLoRaBW() == loRaApp->loRaBW && loRaTransmission->getLoRaSF() == loRaApp->loRaSF))
+        cModule *appModule = getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp");
+        LoRaNodeApp *loRaApp = dynamic_cast<LoRaNodeApp *>(appModule);
+        LoRaEndNodeApp *endApp = nullptr;
+        if (!loRaApp) {
+            endApp = dynamic_cast<LoRaEndNodeApp *>(appModule);
+        }
+        if (loRaApp && (loRaTransmission->getLoRaCF() == loRaApp->loRaCF && loRaTransmission->getLoRaBW() == loRaApp->loRaBW && loRaTransmission->getLoRaSF() == loRaApp->loRaSF))
         {
             std::cout<<"checking"<<std::endl;
+            return true;
+        }
+        else if (endApp && (loRaTransmission->getLoRaCF() == endApp->loRaCF && loRaTransmission->getLoRaBW() == endApp->loRaBW && loRaTransmission->getLoRaSF() == endApp->loRaSF)) {
+            std::cout<<"checking (end node app)"<<std::endl;
             return true;
         }
         else {
@@ -82,13 +92,20 @@ bool LoRaReceiver::computeIsReceptionPossible(const IListening *listening, const
 
 bool LoRaReceiver::computeIsReceptionPossible(const IListening *listening, const IReception *reception, IRadioSignal::SignalPart part) const
 {
-    LoRaNodeApp *loRaApp = check_and_cast<LoRaNodeApp *>(getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp"));
+    cModule *appModule = getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp");
+    LoRaNodeApp *loRaApp = dynamic_cast<LoRaNodeApp *>(appModule);
+    LoRaEndNodeApp *endApp = nullptr;
+    if (!loRaApp) {
+        endApp = dynamic_cast<LoRaEndNodeApp *>(appModule);
+    }
     //here we can check compatibility of LoRaTx parameters (or beeing a gateway) and reception above sensitivity level
     const LoRaBandListening *loRaListening = check_and_cast<const LoRaBandListening *>(listening);
     const LoRaReception *loRaReception = check_and_cast<const LoRaReception *>(reception);
 
     // If CAD is enabled on the node, the node should be able to receive a packet regardless of the SF being used (sensitivity may be affected, though).
-    if (iAmGateway == false && (loRaListening->getLoRaCF() != loRaReception->getLoRaCF() || loRaListening->getLoRaBW() != loRaReception->getLoRaBW() || (loRaApp->loRaCAD == false && loRaListening->getLoRaSF() != loRaReception->getLoRaSF()))) {
+    bool cadEnabled = false;
+    if (loRaApp) cadEnabled = loRaApp->loRaCAD; else if (endApp) cadEnabled = endApp->loRaCAD;
+    if (iAmGateway == false && (loRaListening->getLoRaCF() != loRaReception->getLoRaCF() || loRaListening->getLoRaBW() != loRaReception->getLoRaBW() || (cadEnabled == false && loRaListening->getLoRaSF() != loRaReception->getLoRaSF()))) {
         std::cout<<"checking false"<<std::endl;
         return false;
     } else {
@@ -296,8 +313,14 @@ const IListening *LoRaReceiver::createListening(const IRadio *radio, const simti
         EV_INFO << "endTime meeeeeeeeeee = " << endTime << endl;
 //        EV_INFO << "TimeOnAir meeeeeee =" << differentTime <<endl;
 
-        LoRaNodeApp *loRaApp = check_and_cast<LoRaNodeApp *>(getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp"));
-        return new LoRaBandListening(radio, startTime, endTime, startPosition, endPosition, loRaApp->loRaCF, loRaApp->loRaSF, loRaApp->loRaBW);
+    cModule *appModule = getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp");
+    LoRaNodeApp *loRaApp = dynamic_cast<LoRaNodeApp *>(appModule);
+    LoRaEndNodeApp *endApp = nullptr;
+    if (!loRaApp) endApp = dynamic_cast<LoRaEndNodeApp *>(appModule);
+    Hz cf = Hz(0); int sf = 0; Hz bw = Hz(0);
+    if (loRaApp) { cf = loRaApp->loRaCF; sf = loRaApp->loRaSF; bw = loRaApp->loRaBW; }
+    else if (endApp) { cf = endApp->loRaCF; sf = endApp->loRaSF; bw = endApp->loRaBW; }
+    return new LoRaBandListening(radio, startTime, endTime, startPosition, endPosition, cf, sf, bw);
 
 //        EV_INFO << "startTime meeeeeeeeeee = " << startTime << endl;
 //        EV_INFO << "endTime meeeeeeeeeee = " << endTime << endl;
@@ -336,13 +359,17 @@ W LoRaReceiver::getSensitivity(const LoRaReception *reception) const
     // LoRa32 v1.6 device). Therefore, a certain attenuation can be configured on the LoRaNodeApp
     // to be taken into account here.
 
-    LoRaNodeApp *loRaApp = check_and_cast<LoRaNodeApp *>(getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp"));
+    cModule *appModule2 = getParentModule()->getParentModule()->getParentModule()->getSubmodule("LoRaNodeApp");
+    LoRaNodeApp *loRaApp = dynamic_cast<LoRaNodeApp *>(appModule2);
+    LoRaEndNodeApp *endApp2 = nullptr;
+    if (!loRaApp) endApp2 = dynamic_cast<LoRaEndNodeApp *>(appModule2);
 
     double loRaCADatt = 0;
 
-    if (loRaApp->loRaCAD) {
-        loRaCADatt = loRaApp->loRaCADatt;
-    }
+    bool cad = false; double cadAtt = 0;
+    if (loRaApp) { cad = loRaApp->loRaCAD; cadAtt = loRaApp->loRaCADatt; }
+    else if (endApp2) { cad = endApp2->loRaCAD; cadAtt = endApp2->loRaCADatt; }
+    if (cad) loRaCADatt = cadAtt;
 
     if(reception->getLoRaSF() == 6)
     {

@@ -19,6 +19,7 @@ def parse_args():
     ap.add_argument('--results', default='results')
     ap.add_argument('--out', default='analysis')
     ap.add_argument('--buckets', type=int, default=20)
+    ap.add_argument('--keep-duplicates', action='store_true', help='Do not deduplicate failureTime scalars')
     return ap.parse_args()
 
 Scalar = namedtuple('Scalar','module name value repetition')
@@ -51,14 +52,25 @@ def load_scalars(results_dir):
                     scalars.append(Scalar(module,name,value,rep))
     return scalars
 
-def extract_failures(scalars):
+def extract_failures(scalars, keep_duplicates=False):
     failures = []
+    # Some simulations emit duplicate failureTime scalars for the same node
+    # (e.g. multiple components reporting the same event). Deduplicate on
+    # (repetition, node, rounded_time) to avoid duplicate lines in summary.
+    seen = set()
+    dropped = 0
     for s in scalars:
         if s.name == 'failureTime' and NODE_TAG in s.module:
             node = int(s.module.split(NODE_TAG)[1].split(']')[0])
-            failures.append(Failure(node,float(s.value),s.repetition))
+            t = float(s.value)
+            key = (s.repetition, node, round(t, 9))
+            if not keep_duplicates and key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            failures.append(Failure(node, t, s.repetition))
     failures.sort(key=lambda f:(f.repetition,f.time))
-    return failures
+    return failures, dropped
 
 def write_failures_summary(out_dir, failures):
     by_rep = defaultdict(list)
@@ -134,8 +146,11 @@ def main():
     args=parse_args()
     os.makedirs(args.out, exist_ok=True)
     scalars=load_scalars(args.results)
-    failures=extract_failures(scalars)
+    failures,dropped=extract_failures(scalars, keep_duplicates=args.keep_duplicates)
     write_failures_summary(args.out, failures)
+    if dropped>0 and not args.keep_duplicates:
+        with open(os.path.join(args.out,'failures_summary.txt'), 'a') as fh:
+            fh.write(f'Done.\n')
     build_curves(args.out, failures, args.buckets)
     extract_pdr(args.out, scalars)
     detect_partitions(args.out, failures, scalars)
