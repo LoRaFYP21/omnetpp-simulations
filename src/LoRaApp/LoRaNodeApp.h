@@ -40,6 +40,9 @@ namespace inet {
 class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 {
     protected:
+        // Forward declaration so we can reference the nested type in prototypes above its definition
+        class singleMetricRoute;
+
         virtual void initialize(int stage) override;
         void finish() override;
         virtual int numInitStages() const override { return NUM_INIT_STAGES; }
@@ -78,6 +81,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void sendDownMgmtPacket();
         void generateDataPackets();
         void sanitizeRoutingTable();
+    // When enabled (storeBestRouteOnly), ensure at most one route per destination id
+    void addOrReplaceBestSingleRoute(const singleMetricRoute &candidate);
         int pickCADSF();
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
@@ -93,6 +98,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         simtime_t calculateTransmissionDuration(cMessage *msg);
 
+
+    // Routing table CSV logging helpers
+    void openRoutingCsv();
+    void logRoutingSnapshot(const char *eventName);
+    // Delivery logging helpers
+    void openDeliveredCsv();
+    void logDeliveredPacket(const LoRaAppPacket *packet);
+
     // Global failure subset (shared across instances)
     static bool globalFailureInitialized;        // whether subset was chosen
     static std::vector<int> globalFailingNodes;  // chosen node indices
@@ -106,6 +119,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void openRoutingCsv();
     void logRoutingSnapshot(const char *eventName);
     void exportRoutingTables(); // export routing tables at finish
+
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
@@ -306,6 +320,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     bool routingCsvReady = false;
     std::string routingCsvPath;
 
+    // Delivered packets CSV state
+    std::ofstream deliveredCsv;
+    bool deliveredCsvReady = false;
+    std::string deliveredCsvPath;
+
+
 
         /**
          * @name CsmaCaMac state variables
@@ -327,6 +347,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     public:
         LoRaNodeApp() {}
         simsignal_t LoRa_AppPacketSent;
+        simsignal_t LoRa_AppPacketDelivered;
         //LoRa physical layer parameters
         double loRaTP;
         units::values::Hz loRaCF;

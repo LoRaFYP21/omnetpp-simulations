@@ -13,6 +13,7 @@
 // along with this program.  If not, see http://www.gnu.org/licenses/.
 //
 #include <iostream>
+#include <algorithm> // for std::max
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -197,12 +198,15 @@ void LoRaNodeApp::initialize(int stage) {
         dutyCycle = par("dutyCycle");
         numberOfDestinationsPerNode = par("numberOfDestinationsPerNode");
         numberOfPacketsPerDestination = par("numberOfPacketsPerDestination");
+    bool forceSingleDestination = par("forceSingleDestination");
+    int forcedDestinationId = par("forcedDestinationId");
 
         numberOfPacketsToForward = par("numberOfPacketsToForward");
 
         packetsToForwardMaxVectorSize = par("packetsToForwardMaxVectorSize");
 
         LoRa_AppPacketSent = registerSignal("LoRa_AppPacketSent");
+    LoRa_AppPacketDelivered = registerSignal("LoRa_AppPacketDelivered");
 
         currDataInt = 0;
 
@@ -334,6 +338,10 @@ void LoRaNodeApp::initialize(int stage) {
     // Prepare routing CSV path (per-node file)
     openRoutingCsv();
 
+    // Prepare delivered CSV path (per-node file)
+    openDeliveredCsv();
+
+
         //Node identifier
         nodeId = getContainingNode(this)->getIndex();
 
@@ -419,8 +427,12 @@ void LoRaNodeApp::initialize(int stage) {
         }
         generateDataPackets();
 
-        // Routing packets timer
-        timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
+        // Routing packets timer (enforce a minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstRoutingPacket");
+            if (base < 5) base = 5;
+            timeToFirstRoutingPacket = base + getTimeToNextRoutingPacket();
+        }
         switch (routingMetric) {
             // No routing packets are to be sent
             case NO_FORWARDING:
@@ -435,16 +447,24 @@ void LoRaNodeApp::initialize(int stage) {
                 break;
         }
 
-        // Data packets timer
-        timeToFirstDataPacket = math::max(5, par("timeToFirstDataPacket"))+getTimeToNextDataPacket();
+        // Data packets timer (enforce minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstDataPacket");
+            if (base < 5) base = 5;
+            timeToFirstDataPacket = base + getTimeToNextDataPacket();
+        }
         if (LoRaPacketsToSend.size() > 0) {
                     dataPacketsDue = true;
                     nextDataPacketTransmissionTime = timeToFirstDataPacket;
                     EV << "Time to first data packet: " << timeToFirstDataPacket << endl;
         }
 
-        // Forward packets timer
-        timeToFirstForwardPacket = math::max(5, par("timeToFirstForwardPacket"))+getTimeToNextForwardPacket();
+        // Forward packets timer (enforce minimum start delay of 5s)
+        {
+            simtime_t base = par("timeToFirstForwardPacket");
+            if (base < 5) base = 5;
+            timeToFirstForwardPacket = base + getTimeToNextForwardPacket();
+        }
         // THis should not happen, though
         if (LoRaPacketsToForward.size() > 0) {
                     forwardPacketsDue = true;
@@ -784,11 +804,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                 // Update duty cycle end
                 dutyCycleEnd = simTime() + txDuration/dutyCycle;
                 // Update next routing packet transmission time, taking the duty cycle into account
-                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl()/dutyCycle);
+                nextRoutingPacketTransmissionTime = simTime() + std::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl()/dutyCycle);
             }
             else {
                 // Update next routing packet transmission time
-                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
+                nextRoutingPacketTransmissionTime = simTime() + std::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
             }
         }
 
@@ -814,11 +834,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                     // Update duty cycle end
                     dutyCycleEnd = simTime() + txDuration/dutyCycle;
                     // Update next data packet transmission time, taking the duty cycle into account
-                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl()/dutyCycle);
+                    nextDataPacketTransmissionTime = simTime() + std::max(getTimeToNextDataPacket().dbl(), txDuration.dbl()/dutyCycle);
                 }
                 else {
                     // Update next data packet transmission time
-                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl());
+                    nextDataPacketTransmissionTime = simTime() + std::max(getTimeToNextDataPacket().dbl(), txDuration.dbl());
                 }
             }
             // or send forward packet
@@ -828,11 +848,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                     // Update duty cycle end
                     dutyCycleEnd = simTime() + txDuration/dutyCycle;
                     // Update next forward packet transmission time, taking the duty cycle into account
-                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl()/dutyCycle);
+                    nextForwardPacketTransmissionTime = simTime() + std::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl()/dutyCycle);
                 }
                 else {
                 // Update next forward packet transmission time
-                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl());
+                    nextForwardPacketTransmissionTime = simTime() + std::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl());
                 }
             }
         }
@@ -857,11 +877,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             nextScheduleTime = std::min(nextScheduleTime.dbl(), nextForwardPacketTransmissionTime.dbl());
         }
         // but, in any case, not earlier than simTime()+txDuration.
-        nextScheduleTime = math::max(nextScheduleTime.dbl(), simTime().dbl()+txDuration.dbl());
+    nextScheduleTime = std::max(nextScheduleTime.dbl(), simTime().dbl()+txDuration.dbl());
 
         // Take the duty cycle into account
         if (enforceDutyCycle) {
-            nextScheduleTime = math::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
         }
 
         // Last, although this should never happen, check the schedule time is in the future, otherwise just add a 1s delay
@@ -1032,7 +1052,11 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                 break;
                         }
 
-                    singleMetricRoutingTable.push_back(newNeighbour);
+                    if (storeBestRoutesOnly) {
+                        addOrReplaceBestSingleRoute(newNeighbour);
+                    } else {
+                        singleMetricRoutingTable.push_back(newNeighbour);
+                    }
                 }
 
                 // or refresh route to known neighbour.
@@ -1095,7 +1119,11 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                 break;
                             }
 
-                            singleMetricRoutingTable.push_back(newRoute);
+                            if (storeBestRoutesOnly) {
+                                addOrReplaceBestSingleRoute(newRoute);
+                            } else {
+                                singleMetricRoutingTable.push_back(newRoute);
+                            }
                         }
                         // Or update known one
                         else {
@@ -1118,6 +1146,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                         break;
                                 }
                                 singleMetricRoutingTable[routeIndex].valid = simTime() + routeTimeout;
+                                // If keeping only best route, ensure table consistency against other candidates
+                                if (storeBestRoutesOnly) {
+                                    addOrReplaceBestSingleRoute(singleMetricRoutingTable[routeIndex]);
+                                }
                             }
                         }
                     }
@@ -1234,6 +1266,57 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     }
 }
 
+
+// Helper: keep only the best route per destination (single-metric tables)
+// Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
+void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
+    // Make a safe copy because we'll potentially erase from the vector
+    LoRaNodeApp::singleMetricRoute cand = candidate;
+    // Find all entries for this destination id
+    int bestIdx = -1;
+    for (int i = 0; i < (int)singleMetricRoutingTable.size(); ++i) {
+        if (singleMetricRoutingTable[i].id == candidate.id) {
+            if (bestIdx == -1) {
+                bestIdx = i;
+            } else {
+                // Determine if current i is better than current bestIdx
+                const auto &cur = singleMetricRoutingTable[i];
+                const auto &best = singleMetricRoutingTable[bestIdx];
+                if (cur.metric < best.metric ||
+                    (cur.metric == best.metric && cur.valid > best.valid)) {
+                    bestIdx = i;
+                }
+            }
+        }
+    }
+
+    // Compare candidate against current best (if any)
+    bool candidateIsBest = true;
+    if (bestIdx != -1) {
+        const auto &best = singleMetricRoutingTable[bestIdx];
+        if (best.metric < cand.metric ||
+            (best.metric == cand.metric && best.valid >= cand.valid)) {
+            candidateIsBest = false;
+        }
+    }
+
+    if (candidateIsBest) {
+        // Remove all routes to this destination, then insert candidate
+        for (auto it = singleMetricRoutingTable.begin(); it != singleMetricRoutingTable.end(); ) {
+            if (it->id == cand.id) it = singleMetricRoutingTable.erase(it); else ++it;
+        }
+        singleMetricRoutingTable.push_back(cand);
+    } else {
+        // Candidate is worse; if there is no entry for this destination yet, insert it, else ignore
+        if (bestIdx == -1) {
+            singleMetricRoutingTable.push_back(cand);
+            // Now reduce to one (candidate is the only one)
+        }
+        // else do nothing (keep the existing best)
+    }
+}
+
+
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1256,13 +1339,62 @@ void LoRaNodeApp::openRoutingCsv() {
     routingCsvReady = true;
 }
 
+
+void LoRaNodeApp::openDeliveredCsv() {
+    // Build folder and file name under simulations/delivered_packets
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+    std::stringstream ss;
+    ss << folder << sep << "node_" << nodeId << "_delivered.csv";
+    deliveredCsvPath = ss.str();
+    // Create the file if absent and write a simple header once
+    std::ofstream f(deliveredCsvPath, std::ios::out | std::ios::app);
+    if (f.is_open()) {
+        if (f.tellp() == 0) {
+            f << "simTime,src,dst,seq,ttl,viaBefore,arrivalNode" << std::endl;
+        }
+        f.close();
+        deliveredCsvReady = true;
+    } else {
+        deliveredCsvReady = false;
+    }
+}
+
+void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
+    if (!deliveredCsvReady) return;
+    deliveredCsv.open(deliveredCsvPath, std::ios::out | std::ios::app);
+    if (!deliveredCsv.is_open()) return;
+    deliveredCsv << simTime() << ","
+                 << packet->getSource() << ","
+                 << packet->getDestination() << ","
+                 << packet->getDataInt() << ","
+                 << packet->getTtl() << ","
+                 << packet->getVia() << ","
+                 << nodeId
+                 << std::endl;
+    deliveredCsv.flush();
+    deliveredCsv.close();
+}
+
+
 void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     if (!routingCsvReady) return;
     // Open file in truncate mode to reflect current snapshot
     routingCsv.open(routingCsvPath, std::ios::out | std::ios::trunc);
     if (!routingCsv.is_open()) return;
+
     // Write header each time
     routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
+
     const char *metricName = nullptr;
     switch (routingMetric) {
         case NO_FORWARDING: metricName = "NO_FORWARDING"; break;
@@ -1278,18 +1410,38 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     }
     // Single-metric table
     for (const auto &r : singleMetricRoutingTable) {
-        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
-                   << ',' << singleMetricRoutingTable.size()
-                   << ',' << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid
-                   << ",,,"  // placeholders for dual-metric columns
+
+        routingCsv << "simTime=" << simTime()
+                   << ",event=" << eventName
+                   << ",nodeId=" << nodeId
+                   << ",metricType=" << metricName
+                   << ",tableSize=" << singleMetricRoutingTable.size()
+                   << ",id=" << r.id
+                   << ",via=" << r.via
+                   << ",metric=" << r.metric
+                   << ",validUntil=" << r.valid
+                   << ",sf="
+                   << ",priMetric="
+                   << ",secMetric="
+
                    << std::endl;
     }
     // Dual-metric table
     for (const auto &r : dualMetricRoutingTable) {
-        routingCsv << simTime() << ',' << eventName << ',' << nodeId << ',' << metricName
-                   << ',' << dualMetricRoutingTable.size()
-                   << ',' << r.id << ',' << r.via << ",," << r.valid
-                   << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric
+
+        routingCsv << "simTime=" << simTime()
+                   << ",event=" << eventName
+                   << ",nodeId=" << nodeId
+                   << ",metricType=" << metricName
+                   << ",tableSize=" << dualMetricRoutingTable.size()
+                   << ",id=" << r.id
+                   << ",via=" << r.via
+                   << ",metric="
+                   << ",validUntil=" << r.valid
+                   << ",sf=" << r.sf
+                   << ",priMetric=" << r.priMetric
+                   << ",secMetric=" << r.secMetric
+
                    << std::endl;
     }
     routingCsv.flush();
@@ -1388,7 +1540,7 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
             simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
 
             if (enforceDutyCycle) {
-                nextScheduleTime = math::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
             }
 
             if (! (nextScheduleTime > simTime()) ) {
@@ -1409,7 +1561,10 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
     switch (packet->getMsgType()) {
     // DATA packet
     case DATA:
-        //manageReceivedDataPacketForMe(packet);
+        // Log definitive delivery and emit a signal for statistics
+        logDeliveredPacket(packet);
+        emit(LoRa_AppPacketDelivered, (long)packet->getSource());
+        // Existing behavior: forward even at destination (can be tightened later)
         std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
         manageReceivedDataPacketToForward(packet);
         break;
@@ -1942,27 +2097,33 @@ void LoRaNodeApp::generateDataPackets() {
 
     if (!onlyNode0SendsPackets || nodeId == 0) {
         std::vector<int> destinations = { };
+        // If configured, force node 0 to send only to a specific destination
+        bool forceSingleDestination = par("forceSingleDestination");
+        int forcedDestinationId = par("forcedDestinationId");
+        if (forceSingleDestination && nodeId == 0 && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+            destinations.push_back(forcedDestinationId);
+        } else {
+            if (numberOfDestinationsPerNode == 0 )
+                numberOfDestinationsPerNode = numberOfNodes-1;
 
-        if (numberOfDestinationsPerNode == 0 )
-            numberOfDestinationsPerNode = numberOfNodes-1;
+            while (destinations.size() < numberOfDestinationsPerNode
+                    && numberOfNodes - 1 - destinations.size() > 0) {
 
-        while (destinations.size() < numberOfDestinationsPerNode
-                && numberOfNodes - 1 - destinations.size() > 0) {
+                int destination = intuniform(0, numberOfNodes - 1);
 
-            int destination = intuniform(0, numberOfNodes - 1);
+                if (destination != nodeId) {
+                    bool newDestination = true;
 
-            if (destination != nodeId) {
-                bool newDestination = true;
-
-                for (int i = 0; i < destinations.size(); i++) {
-                    if (destination == destinations[i]) {
-                        newDestination = false;
-                        break;
+                    for (int i = 0; i < destinations.size(); i++) {
+                        if (destination == destinations[i]) {
+                            newDestination = false;
+                            break;
+                        }
                     }
-                }
 
-                if (newDestination) {
-                    destinations.push_back(destination);
+                    if (newDestination) {
+                        destinations.push_back(destination);
+                    }
                 }
             }
         }
@@ -1972,7 +2133,8 @@ void LoRaNodeApp::generateDataPackets() {
                 LoRaAppPacket *dataPacket = new LoRaAppPacket("DataPacket");
 
                 dataPacket->setMsgType(DATA);
-                dataPacket->setDataInt(currDataInt+k);
+                // Assign a unique, monotonically increasing sequence per packet
+                dataPacket->setDataInt(currDataInt++);
                 dataPacket->setSource(nodeId);
                 dataPacket->setVia(nodeId);
                 dataPacket->setDestination(destinations[j]);
@@ -1992,7 +2154,6 @@ void LoRaNodeApp::generateDataPackets() {
                 LoRaPacketsToSend.push_back(*dataPacket);
                 delete dataPacket;
             }
-            currDataInt++;
         }
     }
 }
@@ -2289,7 +2450,8 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
 
     int payloadBytes = frame->getByteLength()+8; //+8 bytes for headers
 
-    int payloadSymbNb = 8 + math::max(ceil((8*payloadBytes - 4*cInfo->getLoRaSF() + 28 + 16 - 20*0)/(4*(cInfo->getLoRaSF()-2*0)))*(cInfo->getLoRaCR() + 4), 0);
+    int payloadSymbNb = 8 + std::max( (int) std::ceil((8*payloadBytes - 4*cInfo->getLoRaSF() + 28 + 16 - 20*0)
+                                 /(4*(cInfo->getLoRaSF()-2*0))) * (cInfo->getLoRaCR() + 4), 0);
 
     simtime_t Theader = 0.5 * (8+payloadSymbNb) * Tsym / 1000;
     simtime_t Tpayload = 0.5 * (8+payloadSymbNb) * Tsym / 1000;

@@ -23,6 +23,8 @@ simple LoRaNodeApp
     parameters:
         @signal[LoRa_AppPacketSent](type=long); // optional
         @statistic[LoRa_AppPacketSent](source=LoRa_AppPacketSent; record=count);
+        @signal[LoRa_AppPacketDelivered](type=long); // emitted when a DATA arrives at its destination
+        @statistic[LoRa_AppPacketDelivered](source=LoRa_AppPacketDelivered; record=count);
         int numberOfPacketsToForward = default(0);
 
         volatile double timeToFirstDataPacket @unit(s) = default(300s);
@@ -79,6 +81,9 @@ simple LoRaNodeApp
         double dutyCycle = default(0.01);
         int numberOfDestinationsPerNode = default(1);
         int numberOfPacketsPerDestination = default(1);
+    // Optional: Force sending to a specific destination (useful for experiments)
+    bool forceSingleDestination = default(false);
+    int forcedDestinationId = default(-1);
         int dataPacketDefaultSize @unit(B) = default(50B);
         int routingPacketMaxSize @unit(B) = default(16B);
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
