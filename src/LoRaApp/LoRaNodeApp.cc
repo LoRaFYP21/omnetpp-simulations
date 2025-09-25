@@ -71,23 +71,23 @@ void LoRaNodeApp::initialize(int stage) {
         cModule *host = getContainingNode(this);
 
         // Generate random location for nodes if circle deployment type
-    if (strcmp(host->par("deploymentType").stringValue(), "circle") == 0) {
-        coordsValues = generateUniformCircleCoordinates(
-            host->par("rad").doubleValue(),
-            host->par("centX").doubleValue(),
-            host->par("centY").doubleValue());
-        cModule *mobMod = host->getSubmodule("mobility");
-        if (mobMod) {
-        if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(coordsValues.first);
-        if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(coordsValues.second);
-        }
+        if (strcmp(host->par("deploymentType").stringValue(), "circle") == 0) {
+            coordsValues = generateUniformCircleCoordinates(
+                    host->par("rad").doubleValue(),
+                    host->par("centX").doubleValue(),
+                    host->par("centY").doubleValue());
+            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
+                    host->getSubmodule("mobility"));
+            mobility->par("initialX").setDoubleValue(coordsValues.first);
+            mobility->par("initialY").setDoubleValue(coordsValues.second);
 
         } else if (strcmp(host->par("deploymentType").stringValue(), "edges")== 0) {
             double minX = host->par("minX");
             double maxX = host->par("maxX");
             double minY = host->par("minY");
             double maxY = host->par("maxY");
-        cModule *mobMod = host->getSubmodule("mobility");
+            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
+                    host->getSubmodule("mobility"));
 //            if (strcmp(host->par("deploymentType").stringValue(), "circle")==0) {
 //                       coordsValues = generateUniformCircleCoordinates(host->par("maxGatewayDistance").doubleValue(), host->par("gatewayX").doubleValue(), host->par("gatewayY").doubleValue());
 //                       StationaryMobility *mobility = check_and_cast<StationaryMobility *>(host->getSubmodule("mobility"));
@@ -95,31 +95,27 @@ void LoRaNodeApp::initialize(int stage) {
 //                       mobility->par("initialY").setDoubleValue(coordsValues.second);
 //                    }
 
-        if (mobMod) {
-        double newX = minX + maxX * (((nodeId + 1) % 4 / 2) % 2);
-        double newY = minY + maxY * (((nodeId) % 4 / 2) % 2);
-        if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(newX);
-        if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(newY);
-        }
+            mobility->par("initialX").setDoubleValue(
+                    minX + maxX * (((nodeId + 1) % 4 / 2) % 2));
+            mobility->par("initialY").setDoubleValue(
+                    minY + maxY * (((nodeId) % 4 / 2) % 2));
         } else if (strcmp(host->par("deploymentType").stringValue(), "grid") == 0) {
             double minX = host->par("minX");
             double sepX = host->par("sepX");
             double minY = host->par("minY");
             double sepY = host->par("sepY");
             int cols = int(sqrt(numberOfNodes));
-            cModule *mobMod2 = host->getSubmodule("mobility");
-            if (mobMod2) {
-                double newX;
-                double newY;
-                if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
-                    newX = minX + sepX * (cols/2);
-                    newY = minY + sepY * (cols/2)+ uniform(0,100);
-                } else {
-                    newX = minX + sepX * (nodeId % cols) + uniform(0,100);
-                    newY = minY + sepY * ((int) nodeId / cols) + uniform(0,100);
-                }
-                if (mobMod2->hasPar("initialX")) mobMod2->par("initialX").setDoubleValue(newX);
-                if (mobMod2->hasPar("initialY")) mobMod2->par("initialY").setDoubleValue(newY);
+            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
+                    host->getSubmodule("mobility"));
+            if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
+                mobility->par("initialX").setDoubleValue(minX + sepX * (cols/2));
+                mobility->par("initialY").setDoubleValue(minY + sepY * (cols/2)+ uniform(0,100));
+            }
+            else{
+                mobility->par("initialX").setDoubleValue(
+                        minX + sepX * (nodeId % cols) + uniform(0,100));
+                mobility->par("initialY").setDoubleValue(
+                        minY + sepY * ((int) nodeId / cols) + uniform(0,100));
             }
         } else {
             double minX = host->par("minX");
@@ -130,11 +126,10 @@ void LoRaNodeApp::initialize(int stage) {
             double inix = host->par("initialX");
             double iniy = host->par("initialY");
                 // checking whether the node is a end node or not.
-            cModule *mobMod3 = host->getSubmodule("mobility");
-            if (mobMod3) {
-                if (mobMod3->hasPar("initialX")) mobMod3->par("initialX").setDoubleValue(inix);
-                if (mobMod3->hasPar("initialY")) mobMod3->par("initialY").setDoubleValue(iniy);
-            }
+            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
+                    host->getSubmodule("mobility"));
+            mobility->par("initialX").setDoubleValue(inix);
+            mobility->par("initialY").setDoubleValue(iniy);
         }
     } else if (stage == INITSTAGE_APPLICATION_LAYER) {
         bool isOperational;
@@ -337,10 +332,8 @@ void LoRaNodeApp::initialize(int stage) {
 
     // Prepare routing CSV path (per-node file)
     openRoutingCsv();
-
     // Prepare delivered CSV path (per-node file)
     openDeliveredCsv();
-
 
         //Node identifier
         nodeId = getContainingNode(this)->getIndex();
@@ -350,6 +343,10 @@ void LoRaNodeApp::initialize(int stage) {
         stopOnACK = par("stopOnACK");
         AppACKReceived = false;
         firstACK = 0;
+        // Proactively create ACK latency CSV if ACKs are requested so user sees the file even before first ACK arrives
+        if (requestACKfromApp && !ackLatencyCsvReady) {
+            openAckLatencyCsv();
+        }
 
         //Spreading factor
         increaseSF = par("increaseSF");
@@ -475,37 +472,6 @@ void LoRaNodeApp::initialize(int stage) {
 
         selfPacket = new cMessage("selfPacket");
         EV_INFO << "selfPacket vinuja" <<endl;
-        // Failure scheduling parameters (local + optional global subset override)
-        timeToFailureParam = par("timeToFailure");
-        failureJitterFracParam = par("failureJitterFrac");
-
-        // Global subset logic: only executed once globally, then applied per node
-        initGlobalFailureSelection();
-        if (globalFailureSubsetCountParam > 0) {
-            // Determine if this node is in the chosen failing subset
-            bool inSubset = std::find(globalFailingNodes.begin(), globalFailingNodes.end(), nodeId) != globalFailingNodes.end();
-            if (!inSubset) {
-                timeToFailureParam = -1; // force disable
-            } else {
-                // Compose failure time: start offset + (optional exponential tail)
-                simtime_t startOffset = globalFailureStartTimeParam >= 0 ? simtime_t(globalFailureStartTimeParam) : SIMTIME_ZERO;
-                simtime_t tail = SIMTIME_ZERO;
-                if (globalFailureExpMeanParam > 0) {
-                    tail = exponential(globalFailureExpMeanParam);
-                }
-                timeToFailureParam = startOffset + tail; // deterministic or shifted exponential
-                failureJitterFracParam = 0; // jitter not applied with global logic
-            }
-        }
-
-        if (timeToFailureParam >= 0 && !failureEvent) {
-            scheduleFailure();
-        }
-        if (timeToFailureParam >= 0 && !failureEvent) {
-            EV_WARN << "[FailureDiag] WARNING: timeToFailureParam=" << timeToFailureParam << " but failureEvent not scheduled (unexpected)" << endl;
-            recordScalar("failureSchedulingAnomaly", 1);
-        }
-
         if (dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
 
             // Only data packet due
@@ -587,15 +553,9 @@ std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
 
 void LoRaNodeApp::finish() {
     cModule *host = getContainingNode(this);
-    Coord coord;
-    if (auto mobMod = host->getSubmodule("mobility")) {
-        // Try dynamic cast to IMobility if available
-        if (auto mobIface = dynamic_cast<inet::IMobility *>(mobMod)) {
-            coord = mobIface->getCurrentPosition();
-        } else if (mobMod->hasPar("initialX") && mobMod->hasPar("initialY")) {
-            coord = Coord(mobMod->par("initialX").doubleValue(), mobMod->par("initialY").doubleValue(), 0);
-        }
-    }
+    StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
+            host->getSubmodule("mobility"));
+    Coord coord = mobility->getCurrentPosition();
 //    recordScalar("positionX", coord.x);
 //    recordScalar("positionY", coord.y);
     // DistanceX.record(coord.x);
@@ -606,14 +566,6 @@ void LoRaNodeApp::finish() {
 
     recordScalar("finalTP", loRaTP);
     recordScalar("finalSF", loRaSF);
-
-    // Failure related scalars
-    recordScalar("failed", failed ? 1 : 0);
-    if (failureTime >= SIMTIME_ZERO)
-        recordScalar("failureTime", failureTime);
-
-    // Export routing tables (CSV + TXT snapshot at end)
-    exportRoutingTables();
 
     recordScalar("sentPackets", sentPackets);
     recordScalar("sentDataPackets", sentDataPackets);
@@ -730,11 +682,7 @@ void LoRaNodeApp::finish() {
 }
 
 void LoRaNodeApp::handleMessage(cMessage *msg) {
-    // If node already failed, drop everything except to process (already processed) failure event
-    if (failed) {
-        delete msg;
-        return;
-    }
+
     if (msg->isSelfMessage()) {
         handleSelfMessage(msg);
     } else {
@@ -744,16 +692,6 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
 
 
 void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
-
-    // If this is the failure event, perform failure and stop any further actions
-    if (msg == failureEvent) {
-        performFailure();
-        return;
-    }
-
-    if (failed) {
-        return; // Ignore timers after failure
-    }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
@@ -928,10 +866,23 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 }
 
 void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
-    if (failed) { delete msg; return; }
     receivedPackets++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+
+    // nextHop filtering (new deterministic unicast layer on top of broadcast medium)
+    // Accept if nextHop == -1 (broadcast/unknown) OR I am the intended nextHop OR I am the final destination (always accept own dest)
+    if (packet->hasPar("nextHop") || true) { // field exists in message definition now
+        int nh = packet->getNextHop();
+        if (packet->getDestination() != nodeId) { // if not final destination
+            if (nh >= 0 && nh != nodeId) {
+                // Not for me to process; early drop
+                EV << "[Node " << nodeId << "] Dropping packet seq=" << packet->getDataInt() << " not my nextHop (" << nh << ")" << endl;
+                delete msg;
+                return;
+            }
+        }
+    }
 
     // Check if the packet is from this node (i.e., a packet that some
     // other node is broadcasting which we have happened to receive). We
@@ -1266,7 +1217,6 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     }
 }
 
-
 // Helper: keep only the best route per destination (single-metric tables)
 // Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
 void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
@@ -1316,7 +1266,6 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
     }
 }
 
-
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1339,7 +1288,6 @@ void LoRaNodeApp::openRoutingCsv() {
     routingCsvReady = true;
 }
 
-
 void LoRaNodeApp::openDeliveredCsv() {
     // Build folder and file name under simulations/delivered_packets
 #ifdef _WIN32
@@ -1360,13 +1308,61 @@ void LoRaNodeApp::openDeliveredCsv() {
     std::ofstream f(deliveredCsvPath, std::ios::out | std::ios::app);
     if (f.is_open()) {
         if (f.tellp() == 0) {
-            f << "simTime,src,dst,seq,ttl,viaBefore,arrivalNode" << std::endl;
+            // Added nextHop column after viaBefore to record final nextHop seen at delivery time
+            f << "simTime,src,dst,seq,ttl,viaBefore,nextHop,arrivalNode" << std::endl;
         }
         f.close();
         deliveredCsvReady = true;
     } else {
         deliveredCsvReady = false;
     }
+}
+
+void LoRaNodeApp::openAckLatencyCsv() {
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("ack_latency");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+    std::stringstream ss;
+    ss << folder << sep << "node_" << nodeId << "_ack_latency.csv";
+    ackLatencyCsvPath = ss.str();
+    EV << "[Node " << nodeId << "] Opening ACK latency CSV at: " << ackLatencyCsvPath << endl;
+    std::ofstream f(ackLatencyCsvPath, std::ios::out | std::ios::app);
+    if (f.is_open()) {
+        if (f.tellp() == 0) {
+            f << "simTime,src,dst,seq,dataDeparture,ackArrival,rtLatency" << std::endl;
+        }
+        f.close();
+        ackLatencyCsvReady = true;
+        EV << "[Node " << nodeId << "] ACK latency CSV ready." << endl;
+    } else {
+        ackLatencyCsvReady = false;
+        EV << "[Node " << nodeId << "] Failed to open ACK latency CSV." << endl;
+    }
+}
+
+void LoRaNodeApp::logAckLatency(int dataSrc, int dataDst, int dataSeq, simtime_t dataDeparture, simtime_t ackArrival) {
+    if (!ackLatencyCsvReady) return;
+    ackLatencyCsv.open(ackLatencyCsvPath, std::ios::out | std::ios::app);
+    if (!ackLatencyCsv.is_open()) return;
+    ackLatencyCsv << simTime() << "," << dataSrc << "," << dataDst << "," << dataSeq << "," << dataDeparture << "," << ackArrival << "," << (ackArrival - dataDeparture) << std::endl;
+    ackLatencyCsv.flush();
+    ackLatencyCsv.close();
+}
+
+void LoRaNodeApp::noteDataForAckTracking(const LoRaAppPacket *packet) {
+    if (!packet->getOptions().getAppACKReq()) return; // only track those needing ACK
+    if (!ackLatencyCsvReady) openAckLatencyCsv();
+    std::tuple<int,int,int> key(packet->getSource(), packet->getDestination(), packet->getDataInt());
+    pendingAckMap[key] = packet->getDepartureTime();
+    EV << "[Node " << nodeId << "] Tracking DATA for ACK seq=" << packet->getDataInt() << " src=" << packet->getSource() << " dst=" << packet->getDestination() << " depTime=" << packet->getDepartureTime() << endl;
 }
 
 void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
@@ -1379,22 +1375,19 @@ void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
                  << packet->getDataInt() << ","
                  << packet->getTtl() << ","
                  << packet->getVia() << ","
+                 << packet->getNextHop() << ","
                  << nodeId
                  << std::endl;
     deliveredCsv.flush();
     deliveredCsv.close();
 }
 
-
 void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     if (!routingCsvReady) return;
     // Open file in truncate mode to reflect current snapshot
     routingCsv.open(routingCsvPath, std::ios::out | std::ios::trunc);
     if (!routingCsv.is_open()) return;
-
-    // Write header each time
-    routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
-
+    // Write rows in key=value format for readability
     const char *metricName = nullptr;
     switch (routingMetric) {
         case NO_FORWARDING: metricName = "NO_FORWARDING"; break;
@@ -1410,7 +1403,6 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     }
     // Single-metric table
     for (const auto &r : singleMetricRoutingTable) {
-
         routingCsv << "simTime=" << simTime()
                    << ",event=" << eventName
                    << ",nodeId=" << nodeId
@@ -1423,12 +1415,10 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
                    << ",sf="
                    << ",priMetric="
                    << ",secMetric="
-
                    << std::endl;
     }
     // Dual-metric table
     for (const auto &r : dualMetricRoutingTable) {
-
         routingCsv << "simTime=" << simTime()
                    << ",event=" << eventName
                    << ",nodeId=" << nodeId
@@ -1441,7 +1431,6 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
                    << ",sf=" << r.sf
                    << ",priMetric=" << r.priMetric
                    << ",secMetric=" << r.secMetric
-
                    << std::endl;
     }
     routingCsv.flush();
@@ -1564,9 +1553,13 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
         // Log definitive delivery and emit a signal for statistics
         logDeliveredPacket(packet);
         emit(LoRa_AppPacketDelivered, (long)packet->getSource());
-        // Existing behavior: forward even at destination (can be tightened later)
-        std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
-        manageReceivedDataPacketToForward(packet);
+        // If application requested an ACK and this is true destination, enqueue ACK back to source
+        if (packet->getOptions().getAppACKReq()) {
+            enqueueAckFor(packet);
+        }
+        // OLD behavior was to forward the DATA again even at destination, which delayed ACK transmission.
+        // Since we only need an ACK back to the source, we stop here and dispose of the packet.
+        delete packet;
         break;
         // ACK packet
     case ACK:
@@ -1576,6 +1569,58 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
     default:
         break;
     }
+}
+
+// Create a minimal ACK packet referencing original DATA and push to send queue
+void LoRaNodeApp::enqueueAckFor(const LoRaAppPacket *dataPkt) {
+    LoRaAppPacket ackTemplate;
+    ackTemplate.setMsgType(ACK);
+    ackTemplate.setDataInt(dataPkt->getDataInt()); // could store seq if available
+    ackTemplate.setSource(nodeId); // this node (destination of DATA) becomes ACK source
+    ackTemplate.setDestination(dataPkt->getSource());
+    ackTemplate.setVia(nodeId);
+    ackTemplate.setTtl(packetTTL); // reuse default TTL
+    ackTemplate.getOptions().setAppACKReq(false); // ACK itself does not request further ACK
+    // minimal size: reuse data packet size logic? keep small (e.g., 5 bytes header) but here reuse existing size field setter
+    ackTemplate.setByteLength(std::min( (int) dataPkt->getByteLength(), 10));
+    ackTemplate.setDepartureTime(simTime());
+    // Initialize nextHop for ACK (reverse path): we try to find best route to original source
+    sanitizeRoutingTable();
+    int routeIndex = getBestRouteIndexTo(ackTemplate.getDestination());
+    if (routeIndex >= 0) {
+        if (singleMetricRoutingTable.size() > 0) {
+            ackTemplate.setNextHop(singleMetricRoutingTable[routeIndex].via);
+        } else if (dualMetricRoutingTable.size() > 0) {
+            ackTemplate.setNextHop(dualMetricRoutingTable[routeIndex].via);
+        }
+    } else {
+        ackTemplate.setNextHop(-1); // fallback broadcast
+    }
+    // Push into send buffer
+    LoRaPacketsToSend.push_back(ackTemplate);
+    // Counters will be incremented when actually transmitted in sendDataPacket()
+    dataPacketsDue = true; // reuse same scheduling path
+    if (!selfPacket->isScheduled()) {
+        // schedule soon respecting duty cycle
+        simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
+        if (enforceDutyCycle) {
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+        }
+        if (!(nextScheduleTime > simTime())) {
+            nextScheduleTime = simTime() + 1;
+        }
+        scheduleAt(nextScheduleTime, selfPacket);
+    }
+    EV << "[Node " << nodeId << "] Enqueued ACK for original DATA seq=" << dataPkt->getDataInt() << " back to src=" << dataPkt->getSource() << endl;
+        // Guarantee ACK latency CSV existence when ACK is generated at destination side
+        if (!ackLatencyCsvReady) {
+            openAckLatencyCsv();
+            if (ackLatencyCsvReady) {
+                EV << "[Node " << nodeId << "] ack_latency CSV created on ACK enqueue." << endl;
+            } else {
+                EV << "[Node " << nodeId << "] FAILED to create ack_latency CSV on ACK enqueue." << endl;
+            }
+        }
 }
 
 void LoRaNodeApp::manageReceivedDataPacketForMe(cMessage *msg) {
@@ -1597,8 +1642,17 @@ void LoRaNodeApp::manageReceivedAckPacketForMe(cMessage *msg) {
     receivedAckPacketsForMe++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
-
-    // Optional: do something with the packet
+    // For an ACK: original DATA src = packet->getDestination(), original DATA dst = packet->getSource()
+    std::tuple<int,int,int> key(packet->getDestination(), packet->getSource(), packet->getDataInt());
+    auto it = pendingAckMap.find(key);
+    if (it != pendingAckMap.end()) {
+        simtime_t dep = it->second;
+        if (!ackLatencyCsvReady) openAckLatencyCsv();
+        logAckLatency(std::get<0>(key), std::get<1>(key), std::get<2>(key), dep, simTime());
+        pendingAckMap.erase(it);
+        AppACKReceived = true;
+        EV << "[Node " << nodeId << "] ACK received for seq=" << packet->getDataInt() << " originalSrc=" << std::get<0>(key) << " originalDst=" << std::get<1>(key) << " RTT=" << (simTime()-dep) << endl;
+    }
 }
 
 bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
@@ -1612,17 +1666,21 @@ bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
 
 
 simtime_t LoRaNodeApp::sendDataPacket() {
-    if (failed) return 0; // Do not send after failure
     LoRaAppPacket *dataPacket = new LoRaAppPacket("DataFrame");
     std::cout << " i am sending the packet: "  << std::endl;
     bool localData = true;
     bool transmit = false;
     simtime_t txDuration = 0;
 
-    // Send local data packets with a configurable ownDataPriority priority over packets to forward, if there is any
-    if (
-            (LoRaPacketsToSend.size() > 0 && bernoulli(ownDataPriority))
-            || (LoRaPacketsToSend.size() > 0 && LoRaPacketsToForward.size() == 0)) {
+    // PRIORITIZE ACKs: If any ACK is pending in LoRaPacketsToSend, send it before forwarding queued packets.
+    int ackIndex = -1;
+    for (size_t i = 0; i < LoRaPacketsToSend.size(); ++i) {
+        if (LoRaPacketsToSend[i].getMsgType() == ACK) { ackIndex = (int)i; break; }
+    }
+
+    bool canSendOwn = LoRaPacketsToSend.size() > 0 && (ackIndex >= 0 || LoRaPacketsToForward.size() == 0 || bernoulli(ownDataPriority));
+
+    if (canSendOwn) {
 
         bubble("Sending a local data packet!");
 
@@ -1633,27 +1691,34 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         fullName += std::to_string(nodeId);
 
 
-        // Get the data from the first packet in the data buffer to send it
-        dataPacket->setMsgType(LoRaPacketsToSend.front().getMsgType());
-        dataPacket->setDataInt(LoRaPacketsToSend.front().getDataInt());
-        dataPacket->setSource(LoRaPacketsToSend.front().getSource());
-        dataPacket->setVia(LoRaPacketsToSend.front().getSource());
-        dataPacket->setDestination(LoRaPacketsToSend.front().getDestination());
-        dataPacket->setTtl(LoRaPacketsToSend.front().getTtl());
-        dataPacket->getOptions().setAppACKReq(LoRaPacketsToSend.front().getOptions().getAppACKReq());
-        dataPacket->setByteLength(LoRaPacketsToSend.front().getByteLength());
-        dataPacket->setDepartureTime(simTime());
+    // Select packet: ACK first if present, else the first queued
+    size_t pick = (ackIndex >= 0) ? (size_t)ackIndex : 0;
+    dataPacket->setMsgType(LoRaPacketsToSend[pick].getMsgType());
+    dataPacket->setDataInt(LoRaPacketsToSend[pick].getDataInt());
+    dataPacket->setSource(LoRaPacketsToSend[pick].getSource());
+    dataPacket->setVia(LoRaPacketsToSend[pick].getSource());
+    dataPacket->setDestination(LoRaPacketsToSend[pick].getDestination());
+    dataPacket->setTtl(LoRaPacketsToSend[pick].getTtl());
+    dataPacket->getOptions().setAppACKReq(LoRaPacketsToSend[pick].getOptions().getAppACKReq());
+    dataPacket->setByteLength(LoRaPacketsToSend[pick].getByteLength());
+    dataPacket->setDepartureTime(simTime());
 
         addName = "Dest";
         fullName += addName;
         fullName += std::to_string(dataPacket->getDestination());
         dataPacket->setName(fullName.c_str());
 
-        LoRaPacketsToSend.erase(LoRaPacketsToSend.begin());
+    LoRaPacketsToSend.erase(LoRaPacketsToSend.begin() + pick);
 
         transmit = true;
 
-        sentDataPackets++;
+        if (dataPacket->getMsgType() == DATA) {
+            sentDataPackets++;
+            noteDataForAckTracking(dataPacket);
+            EV << "[Node " << nodeId << "] Originated DATA seq=" << dataPacket->getDataInt() << " dst=" << dataPacket->getDestination() << " ACKReq=" << dataPacket->getOptions().getAppACKReq() << endl;
+        } else if (dataPacket->getMsgType() == ACK) {
+            sentAckPackets++;
+        }
         if (firstDataPacketTransmissionTime == 0)
             firstDataPacketTransmissionTime = simTime();
         lastDataPacketTransmissionTime = simTime();
@@ -1712,7 +1777,11 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                     if (!isPacketForwarded(dataPacket)) {
                         bubble("Forwarding packet!");
                         forwardedPackets++;
-                        forwardedDataPackets++;
+                        if (dataPacket->getMsgType() == DATA) {
+                            forwardedDataPackets++;
+                        } else if (dataPacket->getMsgType() == ACK) {
+                            forwardedAckPackets++;
+                        }
                         transmit = true;
 
                         // Keep a copy of the forwarded packet to avoid sending it again if received later on
@@ -1747,6 +1816,8 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 
         int routeIndex = getBestRouteIndexTo(dataPacket->getDestination());
 
+        // Determine nextHop just-in-time before assigning via (legacy field)
+        assignNextHop(dataPacket);
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
                 dataPacket->setVia(BROADCAST_ADDRESS);
@@ -1820,7 +1891,6 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 }
 
 simtime_t LoRaNodeApp::sendForwardPacket() {
-    if (failed) return 0; // Do not send after failure
     LoRaAppPacket *forwardPacket = new LoRaAppPacket("DataFrame");
     std::cout << " im here forwarding the new packet: "  << std::endl;
     bool transmit = false;
@@ -1912,6 +1982,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
         int routeIndex = getBestRouteIndexTo(forwardPacket->getDestination());
 
+        // Update nextHop for forwarded packet
+        assignNextHop(forwardPacket);
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
                 forwardPacket->setVia(BROADCAST_ADDRESS);
@@ -1963,10 +2035,39 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
     return txDuration;
 }
 
+// Assign nextHop based on current best route to destination (single or dual metric tables)
+void LoRaNodeApp::assignNextHop(LoRaAppPacket *pkt) {
+    if (!pkt) return;
+    int dst = pkt->getDestination();
+    // Destination reached locally handled before calling this; if already destination, keep -1
+    sanitizeRoutingTable();
+    int routeIndex = getBestRouteIndexTo(dst);
+    if (routeIndex >= 0) {
+        if (singleMetricRoutingTable.size() > 0) {
+            // routeIndex refers to appropriate table (single vs dual) depending on which had entries
+            // We infer by checking bounds: if routeIndex within single table size
+            if (routeIndex < (int)singleMetricRoutingTable.size()) {
+                pkt->setNextHop(singleMetricRoutingTable[routeIndex].via);
+            } else if (dualMetricRoutingTable.size() > 0) {
+                int dualIdx = routeIndex - (int)singleMetricRoutingTable.size();
+                if (dualIdx >=0 && dualIdx < (int)dualMetricRoutingTable.size()) {
+                    pkt->setNextHop(dualMetricRoutingTable[dualIdx].via);
+                }
+            }
+        } else if (dualMetricRoutingTable.size() > 0) {
+            if (routeIndex < (int)dualMetricRoutingTable.size()) {
+                pkt->setNextHop(dualMetricRoutingTable[routeIndex].via);
+            }
+        }
+    } else {
+        pkt->setNextHop(-1); // broadcast fallback
+    }
+    EV << "[Node " << nodeId << "] assignNextHop dst=" << dst << " nextHop=" << pkt->getNextHop() << endl;
+}
+
 
 
 simtime_t LoRaNodeApp::sendRoutingPacket() {
-    if (failed) return 0; // Do not send after failure
 
     bool transmit = false;
     simtime_t txDuration = 0;
@@ -2093,7 +2194,6 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 }
 
 void LoRaNodeApp::generateDataPackets() {
-    if (failed) return; // Do not generate after failure
 
     if (!onlyNode0SendsPackets || nodeId == 0) {
         std::vector<int> destinations = { };
@@ -2152,6 +2252,10 @@ void LoRaNodeApp::generateDataPackets() {
                 }
 
                 LoRaPacketsToSend.push_back(*dataPacket);
+                // Ensure ACK latency CSV is created early if ACKs are requested, even before actual transmission
+                if (requestACKfromApp && !ackLatencyCsvReady) {
+                    openAckLatencyCsv();
+                }
                 delete dataPacket;
             }
         }
@@ -2460,159 +2564,6 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
     return duration;
 }
 
-// ---------------- Failure handling & export helpers ----------------
-
-void LoRaNodeApp::scheduleFailure() {
-    // Apply jitter if configured
-    double base = timeToFailureParam.dbl();
-    if (base < 0) return;
-    double jitterFrac = std::max(0.0, failureJitterFracParam);
-    double jitterPortion = 0.0;
-    if (jitterFrac > 0) {
-        jitterPortion = uniform(-jitterFrac, jitterFrac) * base;
-    }
-    double scheduleDelay = std::max(0.0, base + jitterPortion);
-    failureEvent = new cMessage("failureEvent");
-    scheduleAt(simTime() + scheduleDelay, failureEvent);
-}
-
-void LoRaNodeApp::performFailure() {
-    if (failed) return; // idempotent
-    failed = true;
-    failureTime = simTime();
-    // Cancel any future transmissions
-    if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
-    // Release failureEvent (processed)
-    if (failureEvent) {
-        delete failureEvent;
-        failureEvent = nullptr;
-    }
-    bubble("Node FAILED (simulated random failure)");
-    // Record immediate scalars if not already
-    recordScalar("failed", 1);
-    recordScalar("failureTime", failureTime);
-    // Visual indication in GUI (if running Qtenv)
-    cModule *parentNode = getParentModule();
-    if (parentNode) {
-        try {
-            cDisplayString &ds = parentNode->getDisplayString();
-            // Add semi-transparent red background halo and tooltip
-            ds.setTagArg("b", 0, "30");
-            ds.setTagArg("b", 1, "#FF000080");
-            ds.setTagArg("tt", 0, (std::string("FAILED at ")+failureTime.str()).c_str());
-            // Attempt to tint icon
-            ds.setTagArg("i", 1, "#ff0000");
-        } catch(...) {}
-    }
-}
-
-void LoRaNodeApp::exportRoutingTables() {
-    // Ensure directory exists (reuse logic similar to openRoutingCsv)
-#ifdef _WIN32
-    const char sep = '\\';
-#else
-    const char sep = '/';
-#endif
-    std::string folder = std::string("routing_tables");
-#ifdef _WIN32
-    _mkdir(folder.c_str());
-#else
-    mkdir(folder.c_str(), 0775);
-#endif
-
-    // CSV (single metric)
-    {
-        std::stringstream fcsv;
-        fcsv << folder << sep << "node" << nodeId << "_single.csv";
-        std::ofstream ofs(fcsv.str(), std::ios::out | std::ios::trunc);
-        if (ofs.is_open()) {
-            ofs << "id,via,metric,validUntil" << std::endl;
-            for (auto &r : singleMetricRoutingTable) {
-                ofs << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid << std::endl;
-            }
-        }
-    }
-    // CSV (dual metric)
-    {
-        std::stringstream fcsv2;
-        fcsv2 << folder << sep << "node" << nodeId << "_dual.csv";
-        std::ofstream ofs2(fcsv2.str(), std::ios::out | std::ios::trunc);
-        if (ofs2.is_open()) {
-            ofs2 << "id,via,sf,priMetric,secMetric,validUntil" << std::endl;
-            for (auto &r : dualMetricRoutingTable) {
-                ofs2 << r.id << ',' << r.via << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric << ',' << r.valid << std::endl;
-            }
-        }
-    }
-    // TXT human readable
-    {
-        std::stringstream ftxt;
-        ftxt << folder << sep << "node" << nodeId << "_routing_table.txt";
-        std::ofstream txt(ftxt.str(), std::ios::out | std::ios::trunc);
-        if (txt.is_open()) {
-            txt << "Node " << nodeId << " Routing Table (simTime=" << simTime() << ")\n";
-            txt << "Single-metric entries: " << singleMetricRoutingTable.size() << "\n";
-            for (auto &r : singleMetricRoutingTable) {
-                txt << " dest=" << r.id << " via=" << r.via << " metric=" << r.metric << " validUntil=" << r.valid << "\n";
-            }
-            txt << "Dual-metric entries: " << dualMetricRoutingTable.size() << "\n";
-            for (auto &r : dualMetricRoutingTable) {
-                txt << " dest=" << r.id << " via=" << r.via << " sf=" << r.sf << " pri=" << r.priMetric << " sec=" << r.secMetric << " validUntil=" << r.valid << "\n";
-            }
-            if (failed) {
-                txt << "Node failed at: " << failureTime << "\n";
-            }
-        }
-    }
-}
-
-// -------- Global failure selection static members --------
-bool LoRaNodeApp::globalFailureInitialized = false;
-std::vector<int> LoRaNodeApp::globalFailingNodes = {};
-int LoRaNodeApp::globalFailureSubsetCountParam = -1;
-double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
-double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
-int LoRaNodeApp::globalTotalNodesObserved = 0;
-
-void LoRaNodeApp::initGlobalFailureSelection() {
-    // Read parameters (each instance sees same values); perform selection once
-    int subsetCount = par("globalFailureSubsetCount");
-    simtime_t startTime = par("globalFailureStartTime");
-    simtime_t expMean = par("globalFailureExpMean");
-    if (subsetCount <= 0) {
-        // Nothing to do
-        globalFailureSubsetCountParam = -1;
-        return;
-    }
-    // Track max nodes observed (for late module creation scenarios)
-    if (nodeId + 1 > globalTotalNodesObserved)
-        globalTotalNodesObserved = nodeId + 1;
-    if (!globalFailureInitialized) {
-        globalFailureSubsetCountParam = subsetCount;
-    globalFailureStartTimeParam = (startTime >= SIMTIME_ZERO) ? startTime.dbl() : 0.0;
-    globalFailureExpMeanParam = expMean.dbl();
-        // Build list of all node indices we have now; assume numberOfNodes covers relay nodes
-        int total = par("numberOfNodes");
-        if (total <= 0) total = globalTotalNodesObserved; // fallback
-        std::vector<int> all;
-        all.reserve(total);
-        for (int i = 0; i < total; ++i) all.push_back(i);
-        // Shuffle and take first subsetCount (cMersenneTwister via intrand?)
-        for (int i = 0; i < (int)all.size(); ++i) {
-            int j = intuniform(i, (int)all.size()-1);
-            std::swap(all[i], all[j]);
-        }
-        if (subsetCount > total) subsetCount = total;
-        globalFailingNodes.assign(all.begin(), all.begin()+subsetCount);
-        globalFailureInitialized = true;
-        EV_INFO << "[GlobalFailure] Selected " << subsetCount << " failing nodes out of " << total 
-                << ". StartOffset=" << globalFailureStartTimeParam << "s"
-                << " expMean=" << globalFailureExpMeanParam << "s Nodes=";
-        for (size_t k=0;k<globalFailingNodes.size();++k) EV_INFO << globalFailingNodes[k] << (k+1<globalFailingNodes.size()?",":"");
-        EV_INFO << endl;
-    }
-}
-
 simtime_t LoRaNodeApp::getTimeToNextRoutingPacket() {
     if ( strcmp(par("timeToNextRoutingPacketDist").stringValue(), "uniform") == 0) {
         simtime_t routingTime = uniform(timeToNextRoutingPacketMin, timeToNextRoutingPacketMax);
@@ -2652,4 +2603,3 @@ simtime_t LoRaNodeApp::getTimeToNextForwardPacket() {
 
 
 } //end namespace inet
-

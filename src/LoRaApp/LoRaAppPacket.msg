@@ -59,6 +59,7 @@ packet LoRaAppPacket {
     LoRaOptions options;
     int source;
     int destination;
+    int nextHop = -1; // -1 means unknown/broadcast; otherwise the specific next relay nodeId
     int ttl;
     int via;
 	LoRaRoute routingTable[];

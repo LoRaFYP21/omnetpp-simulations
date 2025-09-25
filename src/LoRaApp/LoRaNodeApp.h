@@ -20,6 +20,8 @@
 #include <string>
 // CSV logging
 #include <fstream>
+#include <map>
+#include <tuple>
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -69,6 +71,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t sendDataPacket();
         simtime_t sendForwardPacket();
         simtime_t sendRoutingPacket();
+    // New helper to create an ACK packet entry in send queue
+    void enqueueAckFor(const LoRaAppPacket *dataPkt);
         void manageReceivedPacketForMe(cMessage *msg);
         void manageReceivedAckPacketForMe(cMessage *msg);
         void manageReceivedDataPacketForMe(cMessage *msg);
@@ -87,17 +91,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
 
-        // Failure simulation helpers
-        void scheduleFailure();
-        void performFailure();
-        bool failed = false;
-        cMessage *failureEvent = nullptr;
-        simtime_t failureTime = -1;
-        double failureJitterFracParam = 0;
-        simtime_t timeToFailureParam = -1;
-
         simtime_t calculateTransmissionDuration(cMessage *msg);
-
 
     // Routing table CSV logging helpers
     void openRoutingCsv();
@@ -105,19 +99,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // Delivery logging helpers
     void openDeliveredCsv();
     void logDeliveredPacket(const LoRaAppPacket *packet);
-
-    // Global failure subset (shared across instances)
-    static bool globalFailureInitialized;        // whether subset was chosen
-    static std::vector<int> globalFailingNodes;  // chosen node indices
-    static int globalFailureSubsetCountParam;    // cached param
-    static double globalFailureStartTimeParam; // cached (seconds)
-    static double globalFailureExpMeanParam;   // cached mean (seconds)
-    static int globalTotalNodesObserved;          // track highest node index+1 seen
-    void initGlobalFailureSelection();            // choose subset if needed
-
-    // Routing table export helper
-    void exportRoutingTables(); // export routing tables at finish
-
+    // ACK latency logging helpers
+    void openAckLatencyCsv();
+    void logAckLatency(int dataSrc, int dataDst, int dataSeq, simtime_t dataDeparture, simtime_t ackArrival);
+    void noteDataForAckTracking(const LoRaAppPacket *packet);
 
         bool sendPacketsContinuously;
         bool onlyNode0SendsPackets;
@@ -273,6 +258,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int firstACK;
 
         //Spreading factor
+        // Helper to assign nextHop just-in-time before transmission based on current routing table.
+        void assignNextHop(LoRaAppPacket *pkt);
         bool increaseSF;
         int firstACKSF;
         int packetsPerSF;
@@ -317,12 +304,16 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::ofstream routingCsv;
     bool routingCsvReady = false;
     std::string routingCsvPath;
-
     // Delivered packets CSV state
     std::ofstream deliveredCsv;
     bool deliveredCsvReady = false;
     std::string deliveredCsvPath;
-
+    // ACK latency CSV state
+    std::ofstream ackLatencyCsv;
+    bool ackLatencyCsvReady = false;
+    std::string ackLatencyCsvPath;
+    // Track DATA packets requiring ACK: key=(src,dst,seq)
+    std::map<std::tuple<int,int,int>, simtime_t> pendingAckMap;
 
 
         /**
