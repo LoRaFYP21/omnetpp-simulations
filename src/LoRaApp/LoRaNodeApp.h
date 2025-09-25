@@ -115,9 +115,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     static int globalTotalNodesObserved;          // track highest node index+1 seen
     void initGlobalFailureSelection();            // choose subset if needed
 
-    // Routing table CSV logging helpers
-    void openRoutingCsv();
-    void logRoutingSnapshot(const char *eventName);
+    // Routing table export helper
     void exportRoutingTables(); // export routing tables at finish
 
 
