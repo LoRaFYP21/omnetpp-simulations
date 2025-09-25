@@ -1229,6 +1229,28 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
     LoRaAppPacket *dataPacket = packet->dup();
 
+    // AODV PATH ENFORCEMENT: If this node is NOT on the locked reverse path for (source->destination), suppress forwarding.
+    // Condition applies only after source has locked a next hop (aodvLockedNextHop at source) and data is unicast (via != BROADCAST)
+    // We detect path membership by ensuring we have an installed route back to the source OR we are the locked next hop itself.
+    int flowSrc = packet->getSource();
+    int flowDst = packet->getDestination();
+    bool enforcePath = false;
+    // Only enforce for the designated forced flow (origin node 0 to forcedDestinationId) if mapping exists at origin and propagated as routes.
+    if (flowSrc == 0 && aodvLockedNextHop.count(flowDst)) {
+        enforcePath = true;
+    }
+    if (enforcePath) {
+        // If I'm neither the locked first hop (next after source) nor have a valid route entry toward flowDst nor am I the destination, drop.
+        bool isDestination = (nodeId == flowDst);
+        bool isLockedFirstHop = (nodeId == aodvLockedNextHop[flowDst]);
+        bool haveRouteToDst = (getBestRouteIndexTo(flowDst) >= 0);
+        if (!isDestination && !isLockedFirstHop && !haveRouteToDst) {
+            EV << "AODV: Suppress off-path forwarding for flow 0->" << flowDst << " at node " << nodeId << endl;
+            delete dataPacket;
+            return; // Entirely suppress off-path replication
+        }
+    }
+
     // Check for too old packets with TTL <= 1
     if (packet->getTtl() <= 1) {
         bubble("This packet has reached TTL expiration!");
@@ -1254,7 +1276,7 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
             case TIME_ON_AIR_SF_CAD_SF:
             default:
                 // Check if the packet has already been forwarded
-                if (isPacketForwarded(packet)) {
+                    if (isPacketForwarded(packet)) {
                     bubble("This packet has already been forwarded!");
                     forwardPacketsDuplicateAvoid++;
                 }
@@ -1269,6 +1291,14 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
 
                     dataPacket->setTtl(packet->getTtl() - 1);
                     if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size()<packetsToForwardMaxVectorSize) {
+                        // Enforce that the via field remains unicast along path if path enforcement is active
+                        if (enforcePath && aodvLockedNextHop.count(flowDst) && dataPacket->getVia() == BROADCAST_ADDRESS) {
+                            // Convert any stray broadcast copy to unicast toward the next hop if we can infer it via routing table
+                            int idx = getBestRouteIndexTo(flowDst);
+                            if (idx >= 0) {
+                                dataPacket->setVia(singleMetricRoutingTable[idx].via);
+                            }
+                        }
                         LoRaPacketsToForward.push_back(*dataPacket);
                         newPacketToForward = true;
                     }
@@ -1506,6 +1536,20 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             return 0;
         }
 
+        // If we have a locked next hop (from RREP arrival) and it hasn't expired, override route selection to keep same path
+        int destIdForLock = dataPacket->getDestination();
+        if (aodvLockedNextHop.count(destIdForLock)) {
+            if (simTime() <= aodvLockedNextHopExpiry[destIdForLock]) {
+                // Force the via to locked next hop
+                dataPacket->setVia(aodvLockedNextHop[destIdForLock]);
+                // Bypass switching based on metric; treat as unicast
+            } else {
+                // Expired lock, remove
+                aodvLockedNextHop.erase(destIdForLock);
+                aodvLockedNextHopExpiry.erase(destIdForLock);
+            }
+        }
+
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
                 dataPacket->setVia(BROADCAST_ADDRESS);
@@ -1520,7 +1564,10 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             case RSSI_PROD_SINGLE_SF:
             case ETX_SINGLE_SF:
                 if ( routeIndex >= 0 ) {
-                    dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
+                    // Only set via if not already forced by lock
+                    if (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS) {
+                        dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
+                    }
                 }
                 else{
                     dataPacket->setVia(BROADCAST_ADDRESS);
@@ -1533,7 +1580,9 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             case TIME_ON_AIR_HC_CAD_SF:
             case TIME_ON_AIR_SF_CAD_SF:
                 if ( routeIndex >= 0 ) {
-                    dataPacket->setVia(dualMetricRoutingTable[routeIndex].via);
+                    if (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS) {
+                        dataPacket->setVia(dualMetricRoutingTable[routeIndex].via);
+                    }
                     cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
                 }
                 else{
@@ -1672,6 +1721,8 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             bubble("Drop RREP not for me");
             return; // not for me to forward
         }
+        // Log RREP reception event
+        logRrepEvent("recv", rrep->getSrcId(), rrep->getDstId(), packet->getDestination(), packet->getVia(), -1, rrep->getHopCount());
     // Install/refresh forward route to destination (RREP source) via last hop
         int dest = rrep->getDstId(); // final destination of the path
     int via = packet->getLastHop();
@@ -1687,7 +1738,18 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             // RREP reached original source: flush buffered data
             auto it = aodvBufferedData.find(dest);
             if (it != aodvBufferedData.end()) {
+                // Lock the first-hop next hop toward destination based on the reverse route just installed
+                int lockedIdx = getBestRouteIndexTo(dest);
+                if (lockedIdx >= 0) {
+                    aodvLockedNextHop[dest] = singleMetricRoutingTable[lockedIdx].via;
+                    aodvLockedNextHopExpiry[dest] = simTime() + routeTimeout; // expire with route timeout
+                    EV << "AODV: Lock next hop toward dest=" << dest << " via=" << aodvLockedNextHop[dest] << " at source node " << nodeId << endl;
+                }
                 for (auto &dp : it->second) {
+                    // Force via to locked next hop if available (preserve path of RREP)
+                    if (aodvLockedNextHop.count(dest)) {
+                        dp.setVia(aodvLockedNextHop[dest]);
+                    }
                     LoRaPacketsToSend.push_back(dp);
                 }
                 aodvBufferedData.erase(it);
@@ -1708,6 +1770,8 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 }
                 EV << "AODV: Forward RREP unicast to via=" << fwd.getVia() << " at node " << nodeId << endl;
                 bubble("Fwd RREP unicast");
+                int hopc = 0; if (auto fi = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket())) hopc = fi->getHopCount();
+                logRrepEvent("fwd", rrep->getSrcId(), rrep->getDstId(), fwd.getDestination(), packet->getVia(), fwd.getVia(), hopc);
                 aodvPacketsToSend.push_back(fwd);
                 aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
             } else {
@@ -1801,6 +1865,33 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
     aodvPacketsDue = !aodvPacketsToSend.empty();
     if (aodvPacketsDue) nextAodvPacketTransmissionTime = simTime() + txDuration;
     return txDuration;
+}
+
+// Unified logger for RREP events (reception / forwarding)
+void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount) {
+    try {
+        // Ensure directory exists (best effort): OMNeT++ runs from project root, path relative
+        // (If directory creation is needed, could add platform-specific mkdir via system call, omitted for portability.)
+        char path[512];
+        sprintf(path, "simulations/delivered_packets/rrep_forwarders.csv");
+        bool writeHeader = false;
+        {
+            std::ifstream check(path);
+            writeHeader = !check.good();
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) {
+            EV << "AODV: Failed to open RREP forwarders log file: " << path << endl;
+            return;
+        }
+        if (writeHeader) {
+            out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount" << std::endl;
+        }
+        out << simTime() << "," << eventType << "," << nodeId << "," << originSrc << "," << finalDst << "," << envelopeDest << "," << envelopeVia << "," << nextHop << "," << hopCount << std::endl;
+        out.close();
+    } catch (...) {
+        // swallow
+    }
 }
 
 void LoRaNodeApp::maybeStartDiscoveryFor(int destination) {
@@ -1925,10 +2016,33 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
         int routeIndex = getBestRouteIndexTo(forwardPacket->getDestination());
 
+        // AODV PATH ENFORCEMENT for forwarding: if this is the special locked flow (0 -> dest), force unicast via locked path.
+        int fpSrc = forwardPacket->getSource();
+        int fpDst = forwardPacket->getDestination();
+        bool pathFlow = (fpSrc == 0 && aodvLockedNextHop.count(fpDst));
+        if (pathFlow) {
+            // If original source itself is forwarding (rare for duplicates), force first hop.
+            if (nodeId == fpSrc) {
+                forwardPacket->setVia(aodvLockedNextHop[fpDst]);
+            }
+        }
+
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
-                forwardPacket->setVia(BROADCAST_ADDRESS);
-                broadcastForwardedPackets++;
+                if (pathFlow) {
+                    // Override flooding with strict unicast over locked/route next hop
+                    if (nodeId == fpSrc) {
+                        forwardPacket->setVia(aodvLockedNextHop[fpDst]);
+                    } else if (routeIndex >= 0) {
+                        forwardPacket->setVia(singleMetricRoutingTable[routeIndex].via);
+                    } else {
+                        EV << "AODV: Drop path flow packet (no route in flooding mode) at node " << nodeId << endl;
+                        delete forwardPacket; forwardPacket = nullptr; transmit = false; goto after_forward_send_logic;
+                    }
+                } else {
+                    forwardPacket->setVia(BROADCAST_ADDRESS);
+                    broadcastForwardedPackets++;
+                }
                 break;
             case SMART_BROADCAST_SINGLE_SF:
             case HOP_COUNT_SINGLE_SF:
@@ -1939,8 +2053,13 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     forwardPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
                 else{
-                    forwardPacket->setVia(BROADCAST_ADDRESS);
-                    broadcastForwardedPackets++;
+                    if (pathFlow) {
+                        EV << "AODV: Drop path flow packet (no route to enforce unicast) at node " << nodeId << endl;
+                        delete forwardPacket; forwardPacket = nullptr; transmit = false; goto after_forward_send_logic;
+                    } else {
+                        forwardPacket->setVia(BROADCAST_ADDRESS);
+                        broadcastForwardedPackets++;
+                    }
                 }
                 break;
             case TIME_ON_AIR_HC_CAD_SF:
@@ -1963,7 +2082,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
         allTxPacketsSFStats.collect(loRaSF);
         fwdTxPacketsSFStats.collect(loRaSF);
 
-        send(forwardPacket, "appOut");
+    send(forwardPacket, "appOut");
+after_forward_send_logic:
         txSfVector.record(loRaSF);
         txTpVector.record(loRaTP);
         //rxRssiVector.record(loRaTP);
@@ -2178,20 +2298,14 @@ void LoRaNodeApp::increaseSFIfPossible() {
 }
 
 bool LoRaNodeApp::isNeighbour(int neighbourId) {
-    for (std::vector<int>::iterator nbptr = neighbourNodes.begin();
-            nbptr < neighbourNodes.end(); nbptr++) {
-        if (neighbourId == *nbptr) {
-            return true;
-        }
+    for (auto it = neighbourNodes.begin(); it < neighbourNodes.end(); ++it) {
+        if (*it == neighbourId) return true;
     }
     return false;
 }
 
 bool LoRaNodeApp::isRouteInSingleMetricRoutingTable(int id, int via) {
-    if (getRouteIndexInSingleMetricRoutingTable(id, via) >= 0) {
-        return true;
-    }
-    return false;
+    return getRouteIndexInSingleMetricRoutingTable(id, via) >= 0;
 }
 
 int LoRaNodeApp::getRouteIndexInSingleMetricRoutingTable(int id, int via) {

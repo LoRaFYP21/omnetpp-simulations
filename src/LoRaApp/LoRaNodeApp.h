@@ -261,6 +261,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // Reverse path mapping: first-seen parent per origin; and last seen bcastId per origin
     std::map<int,int> aodvReverseParent;          // srcId -> parent (first RREQ hop)
     std::map<int,int> aodvReverseBcastId;         // srcId -> last seen bcastId
+    // Forward path lock: when RREP arrives at original source, remember first-hop next hop toward destination
+    std::map<int,int> aodvLockedNextHop;          // destinationId -> nextHop
+    std::map<int, simtime_t> aodvLockedNextHopExpiry; // destinationId -> expiry time
+
+    // Helper to log RREP reception/forwarding events
+    void logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount);
 
 
         //Application parameters
