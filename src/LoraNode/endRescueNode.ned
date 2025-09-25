@@ -7,6 +7,8 @@ package loranetwork.LoraNode;
 import inet.mobility.static.StationaryMobility; // default stationary model
 import inet.mobility.contract.IMobility;        // interface so we can parametrize mobility type
 import inet.mobility.single.LinearMobility; // fallback simple mobility
+import inet.mobility.single.CircleMobility; // fallback simple mobility
+import inet.mobility.single.MassMobility; // fallback simple mobility
 import inet.networklayer.common.InterfaceTable;
 import loranetwork.LoRa.LoRaNic;
 import loranetwork.LoRaApp.LoRaEndRescueNodeApp;
@@ -43,6 +45,7 @@ module endRescueNode
         mobility: <mobilityType> like IMobility {
             @display("p=24,88");
         }
+       
         LoRaNic: LoRaNic {
             @display("p=137,239");
         }
