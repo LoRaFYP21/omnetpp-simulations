@@ -4,7 +4,9 @@
 //
 package loranetwork.LoraNode;
 
-import inet.mobility.static.StationaryMobility;
+import inet.mobility.static.StationaryMobility; // default stationary model
+import inet.mobility.contract.IMobility;        // interface so we can parametrize mobility type
+import inet.mobility.single.LinearMobility; // fallback simple mobility
 import inet.networklayer.common.InterfaceTable;
 import loranetwork.LoRa.LoRaNic;
 import loranetwork.LoRaApp.LoRaEndRescueNodeApp;
@@ -26,6 +28,10 @@ module endRescueNode
         double maxGatewayDistance = default(320.0);
         double gatewayX = default(320.0);
         double gatewayY = default(320.0);
+    // New: allow choosing a mobility model at runtime.
+    // Set via **.mobilityType in .ini (e.g. "LinearMobility" or any available model).
+    // Falls back to StationaryMobility if not overridden.
+    string mobilityType = default("StationaryMobility");
         @networkNode();
         *.interfaceTableModule = default(absPath(".interfaceTable"));
         @display("bgb=297,313;i=device/accesspoint;is=vs");
@@ -33,7 +39,8 @@ module endRescueNode
         interfaceTable: InterfaceTable {
             @display("p=30,26");
         }
-        mobility: StationaryMobility {
+        // Mobility is now a parametric submodule; select via **.mobilityType in ini file.
+        mobility: <mobilityType> like IMobility {
             @display("p=24,88");
         }
         LoRaNic: LoRaNic {
