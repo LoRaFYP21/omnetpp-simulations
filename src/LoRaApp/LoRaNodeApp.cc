@@ -182,6 +182,9 @@ void LoRaNodeApp::initialize(int stage) {
         broadcastForwardedPackets = 0;
         deletedRoutes = 0;
         forwardBufferFull = 0;
+    unicastNoRouteDrops = 0;
+    unicastWrongNextHopDrops = 0;
+    unicastFallbackBroadcasts = 0;
 
         firstDataPacketTransmissionTime = 0;
         lastDataPacketTransmissionTime = 0;
@@ -667,6 +670,10 @@ void LoRaNodeApp::finish() {
     recordScalar("forwardPacketsNotSent", LoRaPacketsToSend.size());
 
     recordScalar("forwardBufferFull", forwardBufferFull);
+    // Strict unicast scalars
+    recordScalar("unicastNoRouteDrops", unicastNoRouteDrops);
+    recordScalar("unicastWrongNextHopDrops", unicastWrongNextHopDrops);
+    recordScalar("unicastFallbackBroadcasts", unicastFallbackBroadcasts);
 
     for (std::vector<LoRaAppPacket>::iterator lbptr = LoRaPacketsToSend.begin();
             lbptr < LoRaPacketsToSend.end(); lbptr++) {
@@ -957,39 +964,42 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
         }
         lastDataPacketReceptionTime = simTime();
     }
-    // Else it can be a routing protocol broadcast message
+    // Else possible routing protocol broadcast
     else if (packet->getDestination() == BROADCAST_ADDRESS) {
-        manageReceivedRoutingPacket(packet);
+        manageReceivedRoutingPacket(packet); // still processed as before
     }
-    // Else it can be a data packet from and to other nodes...
+    // Else data packet between other nodes (forwarding decision)
     else {
-        // which we may forward, if it is being broadcast
-        if (packet->getVia() == BROADCAST_ADDRESS && routeDiscovery == true) {
-
-            std::cout << "msg type broadcast and route : " << packet->getMsgType() << std::endl;
-
-            bubble("I received a multicast data packet to forward!");
-            manageReceivedDataPacketToForward(packet);
-            if (firstDataPacketReceptionTime == 0) {
-                firstDataPacketReceptionTime = simTime();
+        bool broadcastMode = (routingMetric == FLOODING_BROADCAST_SINGLE_SF || routingMetric == SMART_BROADCAST_SINGLE_SF);
+        if (broadcastMode) {
+            // Legacy behaviour for broadcast-based dissemination
+            if (packet->getVia() == BROADCAST_ADDRESS) {
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else if (packet->getVia() == nodeId) { // targeted within broadcast metric (rare)
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else {
+                // Ignore silently: broadcast metric but not intended next hop
+                unicastWrongNextHopDrops++; // reuse counter for diagnostics
             }
-            lastDataPacketReceptionTime = simTime();
-        }
-        // or unicast via this node
-        else if (packet->getVia() == nodeId) {
-            bubble("I received a unicast data packet to forward!");
-            manageReceivedDataPacketToForward(packet);
-            if (firstDataPacketReceptionTime == 0) {
-                firstDataPacketReceptionTime = simTime();
+        } else {
+            // Unicast metrics with possible fallback broadcast when a sender had no route.
+            // Accept if we are the explicit next hop OR if the packet was broadcast fallback (via == BROADCAST_ADDRESS).
+            if (packet->getVia() == nodeId || packet->getVia() == BROADCAST_ADDRESS) {
+                // Count fallback broadcasts only when they are actually processed (diagnostic).
+                if (packet->getVia() == BROADCAST_ADDRESS) {
+                    unicastFallbackBroadcasts++; // repurpose counter: processed fallback broadcasts
+                }
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else {
+                // We overheard a unicast not for us: drop silently (diagnostic count)
+                unicastWrongNextHopDrops++;
             }
-            lastDataPacketReceptionTime = simTime();
-        }
-        // or not, if it's a unicast packet we just happened to receive.
-        else {
-            bubble("Unicast message not for me! but still forwarding");
-            manageReceivedDataPacketToForward(packet);
-            receivedDataPackets++;
-            lastDataPacketReceptionTime = simTime();
         }
     }
 
@@ -1383,6 +1393,57 @@ void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
                  << std::endl;
     deliveredCsv.flush();
     deliveredCsv.close();
+
+    // Mark path completion for any delivered packet
+    logPathHop(packet, "DELIVERED");
+}
+
+// Initialize global path log file once (all nodes append)
+void LoRaNodeApp::ensurePathLogInitialized() {
+    if (pathLogReady) return;
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+    std::stringstream ss;
+    ss << folder << sep << "paths.csv"; // single consolidated file
+    pathLogFile = ss.str();
+    // Create header if new
+    std::ofstream f(pathLogFile, std::ios::out | std::ios::app);
+    if (f.is_open()) {
+        if (f.tellp() == 0) {
+            f << "simTime,event,packetSeq,src,dst,currentNode,ttlAfterDecr,chosenVia,nextHopType" << std::endl;
+        }
+        f.close();
+        pathLogReady = true;
+    }
+}
+
+// Log each hop (transmission decision) for every data packet
+void LoRaNodeApp::logPathHop(const LoRaAppPacket *packet, const char *eventTag) {
+    ensurePathLogInitialized();
+    if (!pathLogReady) return;
+    std::ofstream f(pathLogFile, std::ios::out | std::ios::app);
+    if (!f.is_open()) return;
+    const char *nhType = (packet->getVia() == BROADCAST_ADDRESS) ? "BCAST" : "UNICAST";
+    f << simTime() << ","
+      << eventTag << ","
+      << packet->getDataInt() << "," // using dataInt as sequence identifier
+      << packet->getSource() << ","
+      << packet->getDestination() << ","
+      << nodeId << ","
+      << packet->getTtl() << ","
+      << packet->getVia() << ","
+      << nhType
+      << std::endl;
+    f.close();
 }
 
 
@@ -1564,9 +1625,7 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
         // Log definitive delivery and emit a signal for statistics
         logDeliveredPacket(packet);
         emit(LoRa_AppPacketDelivered, (long)packet->getSource());
-        // Existing behavior: forward even at destination (can be tightened later)
-        std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
-        manageReceivedDataPacketToForward(packet);
+        // Strict unicast: stop here, do NOT forward further
         break;
         // ACK packet
     case ACK:
@@ -1763,7 +1822,8 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                 if ( routeIndex >= 0 ) {
                     dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
-                else{
+                else {
+                    // Broadcast fallback when no route known
                     dataPacket->setVia(BROADCAST_ADDRESS);
                     if (localData)
                         broadcastDataPackets++;
@@ -1777,7 +1837,7 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                     dataPacket->setVia(dualMetricRoutingTable[routeIndex].via);
                     cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
                 }
-                else{
+                else {
                     dataPacket->setVia(BROADCAST_ADDRESS);
                     if (localData)
                         broadcastDataPackets++;
@@ -1786,6 +1846,9 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                 }
                 break;
         }
+
+        // Log hop decision for all flows
+        logPathHop(dataPacket, localData ? "TX_SRC" : "TX_FWD");
 
         dataPacket->setControlInfo(cInfo);
 
@@ -1941,6 +2004,10 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     broadcastForwardedPackets++;
                 }
                 break;
+        }
+
+        if (forwardPacket->getSource() == 0 && forwardPacket->getDestination() == 19) {
+            logPathHop(forwardPacket, "TX_FWD");
         }
 
         forwardPacket->setControlInfo(cInfo);
