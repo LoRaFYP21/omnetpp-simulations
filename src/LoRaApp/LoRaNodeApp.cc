@@ -67,6 +67,29 @@ void LoRaNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+
+        // Fresh path log per simulation run: have node 0 truncate and recreate header immediately
+        if (nodeId == 0) {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+            _mkdir(folder.c_str());
+#else
+            mkdir(folder.c_str(), 0775);
+#endif
+            std::stringstream pss; pss << folder << sep << "paths.csv";
+            std::ofstream pf(pss.str(), std::ios::out | std::ios::trunc);
+            if (pf.is_open()) {
+                pf << "simTime,event,packetSeq,src,dst,currentNode,ttlAfterDecr,chosenVia,nextHopType" << std::endl;
+                pf.close();
+            }
+            // Reset the flag used in ensurePathLogInitialized so it knows file already has header
+            pathLogReady = false; // will be set true on first ensurePathLogInitialized() call
+        }
         std::pair<double, double> coordsValues = std::make_pair(-1, -1);
         cModule *host = getContainingNode(this);
 
@@ -1409,7 +1432,10 @@ void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
 
 // Initialize global path log file once (all nodes append)
 void LoRaNodeApp::ensurePathLogInitialized() {
-    if (pathLogReady) return;
+    // We want a fresh paths.csv for each simulation run. Use a static process-wide flag.
+    static bool pathLogClearedThisRun = false;
+    if (pathLogReady) return; // This instance already initialized its handle
+
 #ifdef _WIN32
     const char sep = '\\';
 #else
@@ -1424,13 +1450,18 @@ void LoRaNodeApp::ensurePathLogInitialized() {
     std::stringstream ss;
     ss << folder << sep << "paths.csv"; // single consolidated file
     pathLogFile = ss.str();
-    // Create header if new
-    std::ofstream f(pathLogFile, std::ios::out | std::ios::app);
-    if (f.is_open()) {
-        if (f.tellp() == 0) {
+
+    // If not yet cleared this run, truncate and write header once.
+    if (!pathLogClearedThisRun) {
+        std::ofstream f(pathLogFile, std::ios::out | std::ios::trunc);
+        if (f.is_open()) {
             f << "simTime,event,packetSeq,src,dst,currentNode,ttlAfterDecr,chosenVia,nextHopType" << std::endl;
+            f.close();
+            pathLogClearedThisRun = true;
+            pathLogReady = true;
         }
-        f.close();
+    } else {
+        // Already cleared by another module instance; just mark ready (file exists with header)
         pathLogReady = true;
     }
 }
