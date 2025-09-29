@@ -99,6 +99,12 @@ simple LoRaNodeApp
     int globalFailureSubsetCount = default(0);               // >0 enables selecting that many nodes for coordinated failures
     double globalFailureStartTime @unit(s) = default(0s);    // Base time offset before failures may start
     double globalFailureExpMean @unit(s) = default(0s);      // Exponential tail mean for coordinated failures (0 = disabled)
+    // Routing freeze feature: when enabled, once a node reaches routingFreezeUniqueCount unique destinations, stop modifying table
+    bool freezeRoutingAtThreshold = default(false);
+    int routingFreezeUniqueCount = default(16);
+    // Horizon (in seconds) to extend route validity when freezing. Must stay within simtime range.
+    // Use something comfortably below ~9.22e8 s max (2^63 * 1e-10 scale). Default ~1e7 s (~116 days).
+    double freezeValidityHorizon @unit(s) = default(10000000s);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

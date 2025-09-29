@@ -338,6 +338,13 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     bool convergenceCsvReady = false;
     std::string convergenceCsvPath; // delivered_packets/routing_convergence.csv
 
+    // Routing freeze feature
+    bool freezeRoutingAtThreshold = false;        // parameter value
+    int routingFreezeUniqueCount = 16;            // parameter value
+    bool routingFrozen = false;                   // becomes true once threshold reached (if feature enabled)
+    simtime_t routingFrozenTime = -1;             // when frozen
+    simtime_t freezeValidityHorizon = 0;          // horizon added to simTime when freezing routes
+
 
 
         /**

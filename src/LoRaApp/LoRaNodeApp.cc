@@ -15,6 +15,7 @@
 #include <iostream>
 #include <algorithm> // for std::max
 #include <set>
+#include <cstdio> // snprintf for dynamic event names
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -279,6 +280,32 @@ void LoRaNodeApp::initialize(int stage) {
         getRoutesFromDataPackets = par("getRoutesFromDataPackets");
         packetTTL = par("packetTTL");
         stopRoutingAfterDataDone = par("stopRoutingAfterDataDone");
+
+        // Routing freeze parameters
+        if (hasPar("freezeRoutingAtThreshold"))
+            freezeRoutingAtThreshold = par("freezeRoutingAtThreshold");
+        if (hasPar("routingFreezeUniqueCount"))
+            routingFreezeUniqueCount = par("routingFreezeUniqueCount");
+        if (hasPar("freezeValidityHorizon")) {
+            // Clamp to a reasonable positive value; OMNeT++ simtime range with scale exponent -10 is ~ +/-9.22e8 seconds
+            double horizon = par("freezeValidityHorizon").doubleValue();
+            if (horizon <= 0) {
+                // fallback: 10 * routeTimeout or 1e5 whichever greater
+                double fallback = std::max(1e5, 10.0 * routeTimeout.dbl());
+                EV_WARN << "freezeValidityHorizon <= 0 supplied; using fallback " << fallback << "s" << endl;
+                horizon = fallback;
+            } else if (horizon > 9.0e8) {
+                EV_WARN << "freezeValidityHorizon=" << horizon << " too large; clamping to 9.0e8s to avoid simtime overflow" << endl;
+                horizon = 9.0e8; // keep a safety margin
+            }
+            freezeValidityHorizon = horizon; // stored as simtime_t later when used
+        } else {
+            // Parameter absent (older configs) -> derive heuristic
+            double fallback = std::max(1e5, 10.0 * routeTimeout.dbl());
+            freezeValidityHorizon = fallback;
+        }
+        routingFrozen = false;
+        routingFrozenTime = -1;
 
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
@@ -638,6 +665,11 @@ void LoRaNodeApp::finish() {
     recordScalar("failed", failed ? 1 : 0);
     if (failureTime >= SIMTIME_ZERO)
         recordScalar("failureTime", failureTime);
+    // Freeze related scalars
+    recordScalar("freezeValidityHorizon", freezeValidityHorizon.dbl());
+    recordScalar("routingFrozen", routingFrozen ? 1 : 0);
+    if (routingFrozenTime >= SIMTIME_ZERO)
+        recordScalar("routingFrozenTime", routingFrozenTime);
 
     // Export routing tables (CSV + TXT snapshot at end)
     exportRoutingTables();
@@ -1047,6 +1079,12 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     // Check it actually is a routing message
     if (packet->getMsgType() == ROUTING) {
 
+        // If routing is frozen, we still count the packet but ignore any table modifications
+        if (routingFrozen) {
+            receivedRoutingPackets++;
+            return; // tables remain stable
+        }
+
         receivedRoutingPackets++;
 
     sanitizeRoutingTable();
@@ -1201,6 +1239,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             case TIME_ON_AIR_HC_CAD_SF:
                 bubble("Processing routing packet");
+                if (routingFrozen) break; // skip modifications when frozen
 
                 if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getSource(), packet->getOptions().getLoRaSF())) {
 //                    EV << "Adding neighbour " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
@@ -1247,6 +1286,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             case TIME_ON_AIR_SF_CAD_SF:
                 bubble("Processing routing packet");
+                if (routingFrozen) break; // skip modifications when frozen
 
 //                EV << "Processing routing packet in node " << nodeId << endl;
 //                EV << "Routing table size: " << end(dualMetricRoutingTable) - begin(dualMetricRoutingTable) << endl;
@@ -1313,6 +1353,8 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 // Helper: keep only the best route per destination (single-metric tables)
 // Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
 void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
+    // If routing already frozen, ignore any new candidate to keep table stable
+    if (routingFrozen) return;
     // Make a safe copy because we'll potentially erase from the vector
     LoRaNodeApp::singleMetricRoute cand = candidate;
     // Find all entries for this destination id
@@ -1358,14 +1400,13 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
         // else do nothing (keep the existing best)
     }
 
-    // After any insertion, check if we just reached 16 unique destinations
+    // After any insertion, check if we just reached threshold unique destinations (default 16)
     if (firstTimeReached16 < SIMTIME_ZERO) {
-        // Count unique destination ids present
         std::set<int> uniqueIds;
         for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
-        if ((int)uniqueIds.size() >= 16) {
+        if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
             firstTimeReached16 = simTime();
-            // Lazy-open the convergence CSV (node 0 creates header, others append)
+            // Lazy-open convergence CSV (node 0 creates header, others append)
             if (!convergenceCsvReady) {
 #ifdef _WIN32
                 const char sep = '\\';
@@ -1392,11 +1433,39 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
             if (convergenceCsvReady) {
                 std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
                 if (cf.is_open()) {
-                    cf << simTime() << ",REACHED16," << nodeId << ",16," << singleMetricRoutingTable.size() << std::endl;
+                    // Dynamic event label (retain legacy REACHED16 name when threshold==16 for backward compatibility)
+                    if (routingFreezeUniqueCount == 16) {
+                        cf << simTime() << ",REACHED16," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                    } else {
+                        char ev[32];
+                        std::snprintf(ev, sizeof(ev), "REACHED%d", routingFreezeUniqueCount);
+                        cf << simTime() << "," << ev << "," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                    }
                     cf.close();
                 }
             }
+            // If freeze is enabled and not yet frozen, apply freeze now
+            if (freezeRoutingAtThreshold && !routingFrozen) {
+                routingFrozen = true;
+                routingFrozenTime = simTime();
+                // Extend validity horizons using configured freezeValidityHorizon
+                simtime_t extendBy = freezeValidityHorizon; // already clamped during initialize
+                for (auto &r : singleMetricRoutingTable) {
+                    r.valid = simTime() + extendBy;
+                }
+                for (auto &r : dualMetricRoutingTable) {
+                    r.valid = simTime() + extendBy;
+                }
+                // Log FREEZE event
+                if (convergenceCsvReady) {
+                    std::ofstream cf2(convergenceCsvPath, std::ios::out | std::ios::app);
+                    if (cf2.is_open()) {
+                        cf2 << simTime() << ",FREEZE," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                        cf2.close();
+                    }
+            }
         }
+    }
     }
 }
 
@@ -2514,6 +2583,8 @@ int LoRaNodeApp::getBestRouteIndexTo(int destination) {
 }
 
 void LoRaNodeApp::sanitizeRoutingTable() {
+    // When frozen, keep tables intact
+    if (routingFrozen) return;
     bool routeDeleted = false;
 
     if (singleMetricRoutingTable.size() > 0) {
