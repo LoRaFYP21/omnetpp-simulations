@@ -23,8 +23,6 @@ simple LoRaNodeApp
     parameters:
         @signal[LoRa_AppPacketSent](type=long); // optional
         @statistic[LoRa_AppPacketSent](source=LoRa_AppPacketSent; record=count);
-        @signal[LoRa_AppPacketDelivered](type=long); // emitted when a DATA arrives at its destination
-        @statistic[LoRa_AppPacketDelivered](source=LoRa_AppPacketDelivered; record=count);
         int numberOfPacketsToForward = default(0);
 
         volatile double timeToFirstDataPacket @unit(s) = default(300s);
@@ -77,28 +75,30 @@ simple LoRaNodeApp
         int packetsInSF = default(0);
         bool sendPacketsContinuously = default(false);
         bool onlyNode0SendsPackets = default(false);
+    // If true on a node, always send DATA to a specific destination id set by forcedDestinationId
+    bool forceSingleDestination = default(false);
+    int forcedDestinationId = default(-1);
         bool enforceDutyCycle = default(true);
         double dutyCycle = default(0.01);
         int numberOfDestinationsPerNode = default(1);
         int numberOfPacketsPerDestination = default(1);
-    // Optional: Force sending to a specific destination (useful for experiments)
-    bool forceSingleDestination = default(false);
-    int forcedDestinationId = default(-1);
         int dataPacketDefaultSize @unit(B) = default(50B);
         int routingPacketMaxSize @unit(B) = default(16B);
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
-        volatile double timeToFailure @unit(s) = default(-1s); // <0 means never fail
-        double failureJitterFrac = default(0); // fraction of timeToFailure for +/- uniform jitter
-    // Global failure control (optional): if globalFailureSubsetCount > 0 then exactly that many nodes
-    // will be chosen at runtime to fail. Their failure time will be:
-    //   globalFailureStartTime + (exponential(globalFailureExpMean) if globalFailureExpMean>0 else 0)
-    // All other nodes get timeToFailure = -1 (disabled). These parameters let you set the number
-    // of failing nodes and a common start offset directly from the run configuration dialog.
-    int globalFailureSubsetCount = default(-1);          // <=0 disables global subset logic
-    volatile double globalFailureStartTime @unit(s) = default(-1s); // >=0 enables start offset logic
-    volatile double globalFailureExpMean @unit(s) = default(0s);    // mean for exponential tail; 0 => deterministic
+    // When true, do not send proactive routing beacons; routes are discovered via AODV only
+    bool aodvOnly = default(false);
+    // Failure simulation parameters
+    double timeToFailure @unit(s) = default(-1s);            // -1s disables per-node failure
+    double failureJitterFrac = default(0);                   // Fractional jitter applied to deterministic failures
+    int failureSubsetCount = default(0);                     // If >0, enables global subset coordinated failures
+    double failureStartTime @unit(s) = default(0s);          // Base offset when subset failure process may start
+    double failureExpMean @unit(s) = default(0s);            // Mean for exponential tail; 0 disables tail
+    // Global coordinated failure subset parameters
+    int globalFailureSubsetCount = default(0);               // >0 enables selecting that many nodes for coordinated failures
+    double globalFailureStartTime @unit(s) = default(0s);    // Base time offset before failures may start
+    double globalFailureExpMean @unit(s) = default(0s);      // Exponential tail mean for coordinated failures (0 = disabled)
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

@@ -333,6 +333,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     bool pathLogReady = false;
     std::string pathLogFile; // delivered_packets/paths.csv
 
+    // Convergence instrumentation: time when singleMetricRoutingTable first reaches 16 entries
+    simtime_t firstTimeReached16 = -1; // -1 indicates not yet reached
+    bool convergenceCsvReady = false;
+    std::string convergenceCsvPath; // delivered_packets/routing_convergence.csv
+
 
 
         /**

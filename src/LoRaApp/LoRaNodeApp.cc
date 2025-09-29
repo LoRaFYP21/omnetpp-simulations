@@ -14,6 +14,7 @@
 //
 #include <iostream>
 #include <algorithm> // for std::max
+#include <set>
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -1355,6 +1356,47 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
             // Now reduce to one (candidate is the only one)
         }
         // else do nothing (keep the existing best)
+    }
+
+    // After any insertion, check if we just reached 16 unique destinations
+    if (firstTimeReached16 < SIMTIME_ZERO) {
+        // Count unique destination ids present
+        std::set<int> uniqueIds;
+        for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
+        if ((int)uniqueIds.size() >= 16) {
+            firstTimeReached16 = simTime();
+            // Lazy-open the convergence CSV (node 0 creates header, others append)
+            if (!convergenceCsvReady) {
+#ifdef _WIN32
+                const char sep = '\\';
+#else
+                const char sep = '/';
+#endif
+                std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+                _mkdir(folder.c_str());
+#else
+                mkdir(folder.c_str(), 0775);
+#endif
+                std::stringstream css; css << folder << sep << "routing_convergence.csv";
+                convergenceCsvPath = css.str();
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    if (cf.tellp() == 0) {
+                        cf << "simTime,event,nodeId,threshold,uniqueCount" << std::endl;
+                    }
+                    cf.close();
+                    convergenceCsvReady = true;
+                }
+            }
+            if (convergenceCsvReady) {
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    cf << simTime() << ",REACHED16," << nodeId << ",16," << singleMetricRoutingTable.size() << std::endl;
+                    cf.close();
+                }
+            }
+        }
     }
 }
 
