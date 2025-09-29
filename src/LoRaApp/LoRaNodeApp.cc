@@ -958,6 +958,11 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
 
         std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
 
+        // Path instrumentation: log destination reception prior to processing
+        if (packet->getMsgType() == DATA) {
+            logPathHop(packet, "RX_DST_PRE");
+        }
+
         manageReceivedPacketForMe(packet);
         if (firstDataPacketReceptionTime == 0) {
             firstDataPacketReceptionTime = simTime();
@@ -992,6 +997,10 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
                 // Count fallback broadcasts only when they are actually processed (diagnostic).
                 if (packet->getVia() == BROADCAST_ADDRESS) {
                     unicastFallbackBroadcasts++; // repurpose counter: processed fallback broadcasts
+                }
+                // Path instrumentation: log reception before forwarding logic
+                if (packet->getMsgType() == DATA) {
+                    logPathHop(packet, "RX_FWD_PRE");
                 }
                 manageReceivedDataPacketToForward(packet);
                 if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
@@ -1582,6 +1591,8 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
                     dataPacket->setTtl(packet->getTtl() - 1);
                     if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size()<packetsToForwardMaxVectorSize) {
                         LoRaPacketsToForward.push_back(*dataPacket);
+                        // Debug instrumentation: log enqueue of a forward packet (all flows)
+                        logPathHop(dataPacket, "ENQUEUE_FWD");
                         newPacketToForward = true;
                     }
                     else {
@@ -2006,9 +2017,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                 break;
         }
 
-        if (forwardPacket->getSource() == 0 && forwardPacket->getDestination() == 19) {
-            logPathHop(forwardPacket, "TX_FWD");
-        }
+        // Log all forwarded transmissions (was previously limited to specific flow)
+        logPathHop(forwardPacket, "TX_FWD");
 
         forwardPacket->setControlInfo(cInfo);
 
