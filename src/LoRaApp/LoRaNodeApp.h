@@ -69,6 +69,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t sendDataPacket();
         simtime_t sendForwardPacket();
         simtime_t sendRoutingPacket();
+        simtime_t sendAckPacket(int destinationNode, int originalDataSeq);
         void manageReceivedPacketForMe(cMessage *msg);
         void manageReceivedAckPacketForMe(cMessage *msg);
         void manageReceivedDataPacketForMe(cMessage *msg);

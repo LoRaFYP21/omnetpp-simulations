@@ -1682,6 +1682,83 @@ void LoRaNodeApp::manageReceivedPacketToForward(cMessage *msg) {
 void LoRaNodeApp::manageReceivedAckPacketToForward(cMessage *msg) {
     receivedAckPackets++;
     receivedAckPacketsToForward++;
+    bool newAckToForward = false;
+
+    LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+    LoRaAppPacket *ackPacket = packet->dup();
+
+    // Check for too old ACK packets with TTL <= 1
+    if (packet->getTtl() <= 1) {
+        bubble("This ACK packet has reached TTL expiration!");
+        receivedAckPacketsToForwardExpired++;
+    }
+    // ACK packet has not reached its maximum TTL
+    else {
+        receivedAckPacketsToForwardCorrect++;
+
+        switch (routingMetric) {
+            case NO_FORWARDING:
+                bubble("Discarding ACK packet as forwarding is disabled");
+                break;
+
+            case FLOODING_BROADCAST_SINGLE_SF:
+            case SMART_BROADCAST_SINGLE_SF:
+            case HOP_COUNT_SINGLE_SF:
+            case RSSI_SUM_SINGLE_SF:
+            case RSSI_PROD_SINGLE_SF:
+            case ETX_SINGLE_SF:
+            case TIME_ON_AIR_HC_CAD_SF:
+            case TIME_ON_AIR_SF_CAD_SF:
+            default:
+                // Check if the ACK packet has already been forwarded
+                if (isPacketForwarded(packet)) {
+                    bubble("This ACK packet has already been forwarded!");
+                    forwardPacketsDuplicateAvoid++;
+                }
+                // Check if the ACK packet is buffered to be forwarded
+                else if (isPacketToBeForwarded(packet)) {
+                    bubble("This ACK packet is already scheduled to be forwarded!");
+                    forwardPacketsDuplicateAvoid++;
+                }
+                // A previously-unknown ACK packet has arrived
+                else {
+                    bubble("Saving ACK packet to forward it later!");
+                    receivedAckPacketsToForwardUnique++;
+
+                    ackPacket->setTtl(packet->getTtl() - 1);
+                    if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size() < packetsToForwardMaxVectorSize) {
+                        LoRaPacketsToForward.push_back(*ackPacket);
+                        // Debug instrumentation: log enqueue of a forward ACK packet
+                        logPathHop(ackPacket, "ENQUEUE_ACK_FWD");
+                        newAckToForward = true;
+                    }
+                    else {
+                        forwardBufferFull++;
+                    }
+                }
+        }
+    }
+
+    delete ackPacket;
+
+    if (newAckToForward) {
+        forwardPacketsDue = true;
+
+        if (!selfPacket->isScheduled()) {
+            simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
+
+            if (enforceDutyCycle) {
+                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+            }
+
+            if (!(nextScheduleTime > simTime())) {
+                nextScheduleTime = simTime() + 1;
+            }
+
+            scheduleAt(nextScheduleTime, selfPacket);
+            forwardPacketsDue = true;
+        }
+    }
 }
 
 void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
@@ -1778,6 +1855,11 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
         // Log definitive delivery and emit a signal for statistics
         logDeliveredPacket(packet);
         emit(LoRa_AppPacketDelivered, (long)packet->getSource());
+        
+        // Generate ACK packet back to source using routing tables
+        EV << "Destination received DATA packet from " << packet->getSource() << ", generating ACK" << endl;
+        sendAckPacket(packet->getSource(), packet->getDataInt());
+        
         // Strict unicast: stop here, do NOT forward further
         break;
         // ACK packet
@@ -1809,8 +1891,23 @@ void LoRaNodeApp::manageReceivedAckPacketForMe(cMessage *msg) {
     receivedAckPacketsForMe++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
-
-    // Optional: do something with the packet
+    
+    // Log ACK reception with round-trip information
+    EV << "Node " << nodeId << " received ACK from " << packet->getSource() 
+       << " for data packet seq " << packet->getDataInt() 
+       << " at time " << simTime() << endl;
+    
+    bubble("Received ACK!");
+    
+    // Calculate round-trip time if departure time is available
+    if (packet->getDepartureTime() > 0) {
+        simtime_t roundTripTime = simTime() - packet->getDepartureTime();
+        EV << "Round-trip time for seq " << packet->getDataInt() 
+           << ": " << roundTripTime << "s" << endl;
+    }
+    
+    // Log ACK delivery
+    logPathHop(packet, "ACK_DELIVERED");
 }
 
 bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
@@ -2093,7 +2190,11 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     if (!isPacketForwarded(forwardPacket)) {
                         bubble("Forwarding packet!");
                         forwardedPackets++;
-                        forwardedDataPackets++;
+                        if (forwardPacket->getMsgType() == DATA) {
+                            forwardedDataPackets++;
+                        } else if (forwardPacket->getMsgType() == ACK) {
+                            forwardedAckPackets++;
+                        }
                         transmit = true;
 
                         // Keep a copy of the forwarded packet to avoid sending it again if received later on
@@ -2159,8 +2260,12 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                 break;
         }
 
-        // Log all forwarded transmissions (was previously limited to specific flow)
-        logPathHop(forwardPacket, "TX_FWD");
+        // Log all forwarded transmissions with specific packet type
+        if (forwardPacket->getMsgType() == ACK) {
+            logPathHop(forwardPacket, "TX_FWD_ACK");
+        } else {
+            logPathHop(forwardPacket, "TX_FWD_DATA");
+        }
 
         forwardPacket->setControlInfo(cInfo);
 
@@ -2308,6 +2413,102 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
     else {
         delete routingPacket;
     }
+    return txDuration;
+}
+
+simtime_t LoRaNodeApp::sendAckPacket(int destinationNode, int originalDataSeq) {
+    if (failed) return 0; // Do not send after failure
+
+    LoRaAppPacket *ackPacket = new LoRaAppPacket("ACKFrame");
+    simtime_t txDuration = 0;
+
+    bubble("Sending ACK packet!");
+    
+    // Set up ACK packet properties
+    ackPacket->setMsgType(ACK);
+    ackPacket->setSource(nodeId);
+    ackPacket->setDestination(destinationNode);
+    ackPacket->setDataInt(originalDataSeq);  // Include original packet sequence for tracking
+    ackPacket->setTtl(packetTTL);           // Use same TTL as data packets
+    ackPacket->setByteLength(11);           // Small ACK packet size
+    ackPacket->setDepartureTime(simTime());
+
+    // Name packet for tracking
+    std::string fullName = "ACK-";
+    fullName += std::to_string(nodeId);
+    fullName += "-to-";
+    fullName += std::to_string(destinationNode);
+    fullName += "-seq-";
+    fullName += std::to_string(originalDataSeq);
+    ackPacket->setName(fullName.c_str());
+
+    // Add LoRa control info
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+
+    // Sanitize routing table before route lookup
+    sanitizeRoutingTable();
+
+    // Find route to destination using routing tables
+    int routeIndex = getBestRouteIndexTo(destinationNode);
+
+    switch (routingMetric) {
+        case FLOODING_BROADCAST_SINGLE_SF:
+            ackPacket->setVia(BROADCAST_ADDRESS);
+            broadcastDataPackets++;
+            break;
+        case SMART_BROADCAST_SINGLE_SF:
+        case HOP_COUNT_SINGLE_SF:
+        case RSSI_SUM_SINGLE_SF:
+        case RSSI_PROD_SINGLE_SF:
+        case ETX_SINGLE_SF:
+            if (routeIndex >= 0) {
+                ackPacket->setVia(singleMetricRoutingTable[routeIndex].via);
+                EV << "ACK routed to " << destinationNode << " via " << singleMetricRoutingTable[routeIndex].via << endl;
+            } else {
+                // Fallback to broadcast if no route known
+                ackPacket->setVia(BROADCAST_ADDRESS);
+                broadcastDataPackets++;
+                EV << "No route to " << destinationNode << " for ACK, using broadcast fallback" << endl;
+            }
+            break;
+        case TIME_ON_AIR_HC_CAD_SF:
+        case TIME_ON_AIR_SF_CAD_SF:
+            if (routeIndex >= 0) {
+                ackPacket->setVia(dualMetricRoutingTable[routeIndex].via);
+                cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
+                EV << "ACK routed to " << destinationNode << " via " << dualMetricRoutingTable[routeIndex].via << endl;
+            } else {
+                ackPacket->setVia(BROADCAST_ADDRESS);
+                broadcastDataPackets++;
+                EV << "No route to " << destinationNode << " for ACK, using broadcast fallback" << endl;
+            }
+            break;
+        default:
+            ackPacket->setVia(BROADCAST_ADDRESS);
+            break;
+    }
+
+    // Log ACK transmission
+    logPathHop(ackPacket, "TX_ACK");
+
+    ackPacket->setControlInfo(cInfo);
+    txDuration = calculateTransmissionDuration(ackPacket);
+
+    // Update statistics
+    sentPackets++;
+    sentAckPackets++;
+    allTxPacketsSFStats.collect(loRaSF);
+
+    // Send the ACK packet
+    send(ackPacket, "appOut");
+    
+    EV << "Sent ACK from " << nodeId << " to " << destinationNode << " for data seq " << originalDataSeq << endl;
+    
     return txDuration;
 }
 
