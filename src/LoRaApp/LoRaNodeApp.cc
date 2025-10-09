@@ -1234,18 +1234,14 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     // We detect path membership by ensuring we have an installed route back to the source OR we are the locked next hop itself.
     int flowSrc = packet->getSource();
     int flowDst = packet->getDestination();
-    bool enforcePath = false;
-    // Only enforce for the designated forced flow (origin node 0 to forcedDestinationId) if mapping exists at origin and propagated as routes.
-    if (flowSrc == 0 && aodvLockedNextHop.count(flowDst)) {
-        enforcePath = true;
-    }
+    bool enforcePath = aodvOnly; // in AODV-only mode, enforce strict path usage
     if (enforcePath) {
         // If I'm neither the locked first hop (next after source) nor have a valid route entry toward flowDst nor am I the destination, drop.
         bool isDestination = (nodeId == flowDst);
-        bool isLockedFirstHop = (nodeId == aodvLockedNextHop[flowDst]);
+        bool isLockedFirstHop = (aodvLockedNextHop.count(flowDst) && nodeId == aodvLockedNextHop[flowDst]);
         bool haveRouteToDst = (getBestRouteIndexTo(flowDst) >= 0);
         if (!isDestination && !isLockedFirstHop && !haveRouteToDst) {
-            EV << "AODV: Suppress off-path forwarding for flow 0->" << flowDst << " at node " << nodeId << endl;
+            EV << "AODV: Suppress off-path forwarding in AODV-only mode for dst=" << flowDst << " at node " << nodeId << endl;
             delete dataPacket;
             return; // Entirely suppress off-path replication
         }
@@ -1291,12 +1287,15 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
 
                     dataPacket->setTtl(packet->getTtl() - 1);
                     if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size()<packetsToForwardMaxVectorSize) {
-                        // Enforce that the via field remains unicast along path if path enforcement is active
-                        if (enforcePath && aodvLockedNextHop.count(flowDst) && dataPacket->getVia() == BROADCAST_ADDRESS) {
-                            // Convert any stray broadcast copy to unicast toward the next hop if we can infer it via routing table
+                        // AODV-only: do not keep broadcast duplicates; convert to unicast via known next hop or drop
+                        if (aodvOnly && dataPacket->getVia() == BROADCAST_ADDRESS) {
                             int idx = getBestRouteIndexTo(flowDst);
                             if (idx >= 0) {
                                 dataPacket->setVia(singleMetricRoutingTable[idx].via);
+                            } else {
+                                // No known next hop: drop this broadcast copy in strict AODV-only mode
+                                delete dataPacket;
+                                break;
                             }
                         }
                         LoRaPacketsToForward.push_back(*dataPacket);
@@ -2016,27 +2015,17 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
         int routeIndex = getBestRouteIndexTo(forwardPacket->getDestination());
 
-        // AODV PATH ENFORCEMENT for forwarding: if this is the special locked flow (0 -> dest), force unicast via locked path.
+        // AODV PATH ENFORCEMENT for forwarding (generalized): in AODV-only mode, avoid broadcast and require a unicast next hop
         int fpSrc = forwardPacket->getSource();
         int fpDst = forwardPacket->getDestination();
-        bool pathFlow = (fpSrc == 0 && aodvLockedNextHop.count(fpDst));
-        if (pathFlow) {
-            // If original source itself is forwarding (rare for duplicates), force first hop.
-            if (nodeId == fpSrc) {
-                forwardPacket->setVia(aodvLockedNextHop[fpDst]);
-            }
-        }
 
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
-                if (pathFlow) {
-                    // Override flooding with strict unicast over locked/route next hop
-                    if (nodeId == fpSrc) {
-                        forwardPacket->setVia(aodvLockedNextHop[fpDst]);
-                    } else if (routeIndex >= 0) {
+                if (aodvOnly) {
+                    if (routeIndex >= 0) {
                         forwardPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                     } else {
-                        EV << "AODV: Drop path flow packet (no route in flooding mode) at node " << nodeId << endl;
+                        EV << "AODV: Drop forward packet (no route in AODV-only flooding mode) at node " << nodeId << endl;
                         delete forwardPacket; forwardPacket = nullptr; transmit = false; goto after_forward_send_logic;
                     }
                 } else {
@@ -2053,8 +2042,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     forwardPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
                 else{
-                    if (pathFlow) {
-                        EV << "AODV: Drop path flow packet (no route to enforce unicast) at node " << nodeId << endl;
+                    if (aodvOnly) {
+                        EV << "AODV: Drop forward packet (no route to enforce unicast) at node " << nodeId << endl;
                         delete forwardPacket; forwardPacket = nullptr; transmit = false; goto after_forward_send_logic;
                     } else {
                         forwardPacket->setVia(BROADCAST_ADDRESS);
