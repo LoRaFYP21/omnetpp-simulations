@@ -1,0 +1,89 @@
+================================================================================
+LORA MESH NETWORK SIMULATION ANALYSIS REPORT
+================================================================================
+Generated: 2025-10-01 14:13:01
+Data Source: delivered_packets/paths.csv
+Total Events Analyzed: 5532
+
+1. PACKET TRANSMISSION STATISTICS FROM NODE 0
+--------------------------------------------------
+Total data packets transmitted: 1215
+Number of unique destinations: 49
+Expected destinations (1-49): 49 nodes
+SUCCESS: Transmitted to all expected destinations
+
+Packets sent per destination:
+  Node  1:24  Node  2:25  Node  3:25  Node  4:25  Node  5:25  Node  6:24  Node  7:25  Node  8:25  Node  9:25  Node 10:24
+  Node 11:25  Node 12:25  Node 13:25  Node 14:25  Node 15:25  Node 16:25  Node 17:25  Node 18:25  Node 19:24  Node 20:25
+  Node 21:25  Node 22:25  Node 23:25  Node 24:25  Node 25:25  Node 26:25  Node 27:25  Node 28:24  Node 29:25  Node 30:25
+  Node 31:24  Node 32:25  Node 33:24  Node 34:25  Node 35:24  Node 36:25  Node 37:25  Node 38:25  Node 39:25  Node 40:24
+  Node 41:25  Node 42:25  Node 43:25  Node 44:25  Node 45:24  Node 46:25  Node 47:25  Node 48:25  Node 49:25
+
+2. DELIVERY SUCCESS RATE ANALYSIS
+--------------------------------------------------
+Total packets delivered: 122
+Overall delivery success rate: 10.04% (122/1215)
+Number of nodes that received packets: 41/49
+Node reachability: 83.7%
+
+REACHABLE NODES:
+  [1, 2, 3, 5, 6, 7, 8, 9, 10, 12]
+  [13, 14, 15, 16, 18, 19, 21, 22, 24, 25]
+  [26, 27, 28, 29, 30, 32, 33, 34, 35, 36]
+  [37, 38, 39, 42, 43, 44, 45, 46, 47, 48]
+  [49]
+
+UNREACHABLE NODES:
+  [4, 11, 17, 20, 23, 31, 40, 41]
+
+3. TRANSMISSION TIMING ANALYSIS
+--------------------------------------------------
+First transmission time: 200.077 seconds
+Last transmission time: 1999.625 seconds
+Total transmission period: 1799.548 seconds
+
+Time intervals between consecutive transmissions:
+  Average interval: 1.482 seconds
+  Minimum interval: 0.060 seconds
+  Maximum interval: 3.000 seconds
+  Standard deviation: 0.874 seconds
+
+4. END-TO-END TRANSIT TIME ANALYSIS
+--------------------------------------------------
+Successfully matched 122 packet journeys
+
+Transit time statistics:
+  Average transit time: 498.235 seconds
+  Minimum transit time: 0.060 seconds
+  Maximum transit time: 1596.986 seconds
+
+FASTEST DELIVERY:
+  Packet 571 to Node 7: 0.060s
+SLOWEST DELIVERY:
+  Packet 119 to Node 24: 1596.986s
+
+Top 5 fastest deliveries:
+  Seq  Dest  Transit Time
+  571     7     0.060s
+  635     7     0.060s
+  730     7     0.060s
+  819     7     0.060s
+  921     7     0.060s
+
+Top 5 slowest deliveries:
+  Seq  Dest  Transit Time
+   85    45  1568.758s
+  124     9  1586.561s
+  120     6  1588.091s
+   98     3  1595.932s
+  119    24  1596.986s
+
+5. SUMMARY AND RECOMMENDATIONS
+--------------------------------------------------
+POOR: Very low delivery success rate - major network problems
+TIMING WARNING: Very fast transmission intervals - may cause congestion
+LATENCY WARNING: High network latency detected
+
+================================================================================
+END OF REPORT
+================================================================================

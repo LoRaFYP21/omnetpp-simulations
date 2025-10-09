@@ -1,0 +1,61 @@
+================================================================================
+LORA MESH NETWORK SIMULATION ANALYSIS REPORT
+================================================================================
+Generated: 2025-09-30 23:18:51
+Data Source: delivered_packets/paths.csv
+Total Events Analyzed: 22
+
+1. PACKET TRANSMISSION STATISTICS FROM NODE 0
+--------------------------------------------------
+Total data packets transmitted: 1
+Number of unique destinations: 1
+Expected destinations (1-49): 49 nodes
+WARNING: Missing destinations: [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+
+Packets sent per destination:
+  Node  5:1
+
+2. DELIVERY SUCCESS RATE ANALYSIS
+--------------------------------------------------
+Total packets delivered: 1
+Overall delivery success rate: 100.00% (1/1)
+Number of nodes that received packets: 1/49
+Node reachability: 2.0%
+
+REACHABLE NODES:
+  [5]
+
+3. TRANSMISSION TIMING ANALYSIS
+--------------------------------------------------
+Insufficient transmission data for timing analysis
+
+4. END-TO-END TRANSIT TIME ANALYSIS
+--------------------------------------------------
+Successfully matched 1 packet journeys
+
+Transit time statistics:
+  Average transit time: 41.280 seconds
+  Minimum transit time: 41.280 seconds
+  Maximum transit time: 41.280 seconds
+
+FASTEST DELIVERY:
+  Packet 0 to Node 5: 41.280s
+SLOWEST DELIVERY:
+  Packet 0 to Node 5: 41.280s
+
+Top 5 fastest deliveries:
+  Seq  Dest  Transit Time
+    0     5    41.280s
+
+Top 5 slowest deliveries:
+  Seq  Dest  Transit Time
+    0     5    41.280s
+
+5. SUMMARY AND RECOMMENDATIONS
+--------------------------------------------------
+EXCELLENT: High delivery success rate
+LATENCY: Reasonable network response times
+
+================================================================================
+END OF REPORT
+================================================================================
