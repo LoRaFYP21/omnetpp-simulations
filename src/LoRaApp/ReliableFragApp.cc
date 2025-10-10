@@ -26,6 +26,7 @@ void ReliableFragApp::initialize(int stage) {
     msgMaxTries = par("msgMaxTries");
     finalAckBaseTimeout = par("finalAckBaseTimeout");
     perFragSpacing = par("perFragSpacing");
+    sendOnce = par("sendOnce");
 
     loRaTP = par("initialLoRaTP").doubleValue();
     loRaCF = units::values::Hz(par("initialLoRaCF").doubleValue());
@@ -134,8 +135,10 @@ void ReliableFragApp::handleAck(const LoRaAppPacket* pkt) {
         double elapsedMs = (simTime() - sessionStart).dbl() * 1000.0;
         double bps = (elapsedMs > 0) ? (pkt->getRxTotBytes() * 8.0 * 1000.0 / elapsedMs) : 0.0;
         recordScalar("goodput_bps", bps);
-        // schedule next message
-        scheduleNextSend();
+        // schedule next message only if allowed
+        messagesSent++;
+        if (!sendOnce)
+            scheduleNextSend();
         return;
     }
 
@@ -175,14 +178,14 @@ void ReliableFragApp::handleMessage(cMessage *msg) {
                     currentMsgTry++;
                     fragIdx = 0;
                     fragTry = 0;
-                    // allow restarting a new attempt
-                    inFlight = false;
-                    scheduleAt(simTime() + 0.15, sendTimer);
+                    // restart the same message (keep seq)
+                    sendCurrentFragment();
                 } else {
                     // give up this message
                     inFlight = false;
                     recordScalar("msgFailed", 1);
-                    scheduleNextSend();
+                    if (!sendOnce)
+                        scheduleNextSend();
                 }
             }
         }
@@ -193,13 +196,13 @@ void ReliableFragApp::handleMessage(cMessage *msg) {
                 currentMsgTry++;
                 fragIdx = 0;
                 fragTry = 0;
-                // allow restarting a new attempt
-                inFlight = false;
-                scheduleAt(simTime() + 0.15, sendTimer);
+                // restart the same message (keep seq)
+                sendCurrentFragment();
             } else {
                 inFlight = false;
                 recordScalar("msgFailed", 1);
-                scheduleNextSend();
+                if (!sendOnce)
+                    scheduleNextSend();
             }
         }
         return;

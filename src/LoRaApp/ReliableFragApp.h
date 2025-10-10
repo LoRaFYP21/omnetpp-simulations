@@ -49,6 +49,10 @@ class ReliableFragApp : public cSimpleModule
     uint64_t txBytesTotal = 0;
     simtime_t sessionStart = SIMTIME_ZERO;
 
+    // Control periodic sending
+    bool sendOnce = false;
+    int messagesSent = 0;
+
     // Timers
     cMessage* sendTimer = nullptr;
     cMessage* fragAckTimer = nullptr;

@@ -18,6 +18,9 @@ simple ReliableFragApp
         double finalAckBaseTimeout @unit(s) = default(1.8s);
         double perFragSpacing @unit(s) = default(0.015s);
 
+        // Stop after first message (no periodic sends)
+        bool sendOnce = default(false);
+
         // LoRa PHY/MAC options are configured on LoRaNic; app is PHY-agnostic
         // Control info attached per packet
         double initialLoRaTP @unit(dBm) = default(17dBm);
