@@ -61,8 +61,8 @@ module LoRaRadio extends FlatRadioBase
         //Default transmitter power set to maximum for cache limits
         transmitter.power = default(17.0mW);
         transmitter.preambleDuration = 0.001s;
-        //*.energySourceModule = default(absPath(energySourceModule));
-        energySourceModule = default(absPath(energySourceModule));
+        // Bind to local energy storage submodule to avoid circular eval
+        energySourceModule = default(absPath(".IdealEpEnergyStorage"));
         bool iAmGateway = default(false);
         @class(inet::physicallayer::LoRaRadio); //originally it was @class(Radio);
         @display("bgb=215,413");

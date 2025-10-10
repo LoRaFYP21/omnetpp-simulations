@@ -44,4 +44,4 @@ simulations/**/.tkenvrc
 simulations/**/valgrind.out
 simulations/**/log.txt
 
-
+.vscode

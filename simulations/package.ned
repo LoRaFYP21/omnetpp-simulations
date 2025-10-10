@@ -235,3 +235,16 @@ network LoRaMesh
 @statistic[EV](source=LoRaGW; record=count);
 @statistic[EV](source=LoRaMedium; record=count);
 
+// Minimal two-node link for fragmentation experiments
+network LoRaFragLink
+{
+    parameters:
+        @display("bgb=600,300");
+    submodules:
+        tx[1]: loranetwork.LoraNode.LoRaFragTxNode { @display("p=150,150;i=device/wifilaptop"); }
+        rx[1]: loranetwork.LoraNode.LoRaFragRxNode { @display("p=450,150;i=device/wifilaptop"); }
+        LoRaMedium: loranetwork.LoRaPhy.LoRaMedium {
+            @display("p=300,50");
+        }
+}
+

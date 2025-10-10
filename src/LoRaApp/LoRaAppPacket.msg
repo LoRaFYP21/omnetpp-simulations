@@ -56,6 +56,16 @@ class LoRaRoute {
 packet LoRaAppPacket {
     int msgType @enum(AppPacketType);
     int dataInt;
+    // Fragmentation/ARQ metadata (added)
+    int seq = -1;                 // logical message sequence id
+    bool isFragment = false;      // true for fragment packets (MSGF)
+    int fragIdx = -1;             // fragment index (0..fragTot-1)
+    int fragTot = -1;             // total number of fragments
+    bool isFinalAck = false;      // true for final ACK carrying cumulative stats
+    int64 rxTotBytes = 0;         // receiver total app bytes (for ACK)
+    int64 rxTotPkts = 0;          // receiver total data/frag packets (for ACK)
+    int payloadBytes = 0;         // application payload byte count
+    string payload;               // optional payload text (may be empty to save CPU)
     LoRaOptions options;
     int source;
     int destination;
