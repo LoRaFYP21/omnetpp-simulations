@@ -286,6 +286,8 @@ void LoRaNodeApp::initialize(int stage) {
             freezeRoutingAtThreshold = par("freezeRoutingAtThreshold");
         if (hasPar("routingFreezeUniqueCount"))
             routingFreezeUniqueCount = par("routingFreezeUniqueCount");
+        if (hasPar("stopRoutingWhenAllConverged"))
+            stopRoutingWhenAllConverged = par("stopRoutingWhenAllConverged");
         if (hasPar("freezeValidityHorizon")) {
             // Clamp to a reasonable positive value; OMNeT++ simtime range with scale exponent -10 is ~ +/-9.22e8 seconds
             double horizon = par("freezeValidityHorizon").doubleValue();
@@ -306,6 +308,40 @@ void LoRaNodeApp::initialize(int stage) {
         }
         routingFrozen = false;
         routingFrozenTime = -1;
+        locallyConverged = false;
+
+        // Initialize global convergence accounting once per process
+        // Determine participating nodes: use numberOfNodes (relay nodes) unless routingMetric == 0 (end nodes)
+        if (globalNodesExpectingConvergence == 0) {
+            // We consider all nodes in the loRaNodes vector as participants for simplicity
+            int totalCandidates = par("numberOfNodes");
+            if (totalCandidates <= 0) totalCandidates = 0;
+            globalNodesExpectingConvergence = totalCandidates;
+        }
+        // Prepare global CSV once
+        if (!globalConvergenceCsvReady) {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+            _mkdir(folder.c_str());
+#else
+            mkdir(folder.c_str(), 0775);
+#endif
+            std::stringstream gss; gss << folder << sep << "global_routing_convergence.csv";
+            globalConvergenceCsvPath = gss.str();
+            std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+            if (gf.is_open()) {
+                if (gf.tellp() == 0) {
+                    gf << "simTime,event,nodeId,uniqueCount,totalNodes,threshold" << std::endl;
+                }
+                gf.close();
+                globalConvergenceCsvReady = true;
+            }
+        }
 
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
@@ -495,7 +531,8 @@ void LoRaNodeApp::initialize(int stage) {
                 break;
             // Schedule selfRoutingPackets
             default:
-                routingPacketsDue = true;
+        // If global convergence already announced, suppress routing beacons
+        routingPacketsDue = ! (stopRoutingWhenAllConverged && globalConvergedFired);
                 nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
                 EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
                 break;
@@ -816,6 +853,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
     if (failed) {
         return; // Ignore timers after failure
+    }
+
+    // If global convergence reached, stop routing immediately in all nodes
+    if (stopRoutingWhenAllConverged && globalConvergedFired) {
+        routingPacketsDue = false;
     }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
@@ -1463,11 +1505,54 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
                         cf2 << simTime() << ",FREEZE," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
                         cf2.close();
                     }
+                }
+            }
+            // Announce local convergence into the global aggregator
+            if (stopRoutingWhenAllConverged) {
+                announceLocalConvergenceIfNeeded((int)uniqueIds.size());
+                tryStopRoutingGlobally();
             }
         }
     }
+
+}
+
+// When this node reaches threshold the first time, bump the global counter and log
+void LoRaNodeApp::announceLocalConvergenceIfNeeded(int uniqueCount) {
+    if (locallyConverged) return;
+    locallyConverged = true;
+    // Increase shared count
+    globalNodesConverged++;
+    if (globalConvergenceCsvReady) {
+        std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+        if (gf.is_open()) {
+            gf << simTime() << ",NODE_CONVERGED," << nodeId << "," << uniqueCount << "," << globalNodesExpectingConvergence << "," << routingFreezeUniqueCount << std::endl;
+            gf.close();
+        }
     }
 }
+
+// If all nodes are converged, stop routing packets across the network
+void LoRaNodeApp::tryStopRoutingGlobally() {
+    if (!stopRoutingWhenAllConverged) return;
+    if (globalConvergedFired) return;
+    if (globalNodesExpectingConvergence <= 0) return; // nothing to do
+    if (globalNodesConverged < globalNodesExpectingConvergence) return;
+    // Fire once
+    globalConvergedFired = true;
+    // Broadcast-style stop: each node will see this condition independently; we set routingPacketsDue=false locally
+    routingPacketsDue = false;
+    // Also log a GLOBAL_CONVERGED event
+    if (globalConvergenceCsvReady) {
+        std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+        if (gf.is_open()) {
+            gf << simTime() << ",GLOBAL_CONVERGED," << nodeId << ",,"
+               << globalNodesExpectingConvergence << "," << routingFreezeUniqueCount << std::endl;
+            gf.close();
+        }
+    }
+}
+
 
 
 void LoRaNodeApp::openRoutingCsv() {
@@ -2995,6 +3080,13 @@ int LoRaNodeApp::globalFailureSubsetCountParam = -1;
 double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
 double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
 int LoRaNodeApp::globalTotalNodesObserved = 0;
+
+// -------- Global routing convergence static members --------
+int LoRaNodeApp::globalNodesExpectingConvergence = 0;
+int LoRaNodeApp::globalNodesConverged = 0;
+bool LoRaNodeApp::globalConvergedFired = false;
+std::string LoRaNodeApp::globalConvergenceCsvPath = std::string();
+bool LoRaNodeApp::globalConvergenceCsvReady = false;
 
 void LoRaNodeApp::initGlobalFailureSelection() {
     // Read parameters (each instance sees same values); perform selection once

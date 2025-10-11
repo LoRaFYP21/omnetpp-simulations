@@ -105,6 +105,9 @@ simple LoRaNodeApp
     // Horizon (in seconds) to extend route validity when freezing. Must stay within simtime range.
     // Use something comfortably below ~9.22e8 s max (2^63 * 1e-10 scale). Default ~1e7 s (~116 days).
     double freezeValidityHorizon @unit(s) = default(10000000s);
+    // If true, once all participating nodes have a unique route to every destination (global convergence),
+    // all nodes stop sending routing packets immediately.
+    bool stopRoutingWhenAllConverged = default(true);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

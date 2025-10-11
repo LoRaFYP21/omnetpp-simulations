@@ -346,6 +346,19 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     simtime_t routingFrozenTime = -1;             // when frozen
     simtime_t freezeValidityHorizon = 0;          // horizon added to simTime when freezing routes
 
+    // Global routing convergence stop feature
+    bool stopRoutingWhenAllConverged = true;      // parameter value
+    // Track whether THIS node has already announced local convergence
+    bool locallyConverged = false;
+    // Static shared counters to coordinate a global stop across all nodes
+    static int globalNodesExpectingConvergence;   // total nodes considered for convergence
+    static int globalNodesConverged;              // how many have reached threshold
+    static bool globalConvergedFired;             // whether global stop already triggered
+    static std::string globalConvergenceCsvPath;  // shared path for events
+    static bool globalConvergenceCsvReady;        // header initialized
+    void announceLocalConvergenceIfNeeded(int uniqueCount);
+    void tryStopRoutingGlobally();
+
 
 
         /**
