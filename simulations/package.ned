@@ -5,7 +5,6 @@ import inet.node.inet.Router;
 import inet.node.internetcloud.InternetCloud;
 import loranetwork.LoRaPhy.LoRaMedium;
 import loranetwork.LoraNode.LoRaNode;
-//import loranetwork.LoraNode.endNode;
 import loranetwork.LoraNode.LoRaGW;
 import inet.node.inet.StandardHost;
 import inet.networklayer.configurator.ipv4.IPv4NetworkConfigurator;

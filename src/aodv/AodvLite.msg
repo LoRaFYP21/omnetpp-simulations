@@ -11,6 +11,8 @@ packet Rreq {
 	int hopCount;     // Hop count from origin
 	int bcastId;      // Broadcast ID to suppress duplicates
 	int ttl;          // Time-to-live for propagation control
+	// Accumulated path of node IDs from originator to current hop (append per forward)
+	int path[];
 }
 
 packet Rrep {
@@ -19,5 +21,7 @@ packet Rrep {
 	int dstSeq;       // Destination sequence number (optional)
 	int hopCount;     // Hop count back to the originator
 	double lifetime;  // Route validity duration (seconds)
+	// Accumulated path of node IDs from destination back to origin (append per forward)
+	int path[];
 }
 

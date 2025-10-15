@@ -15,6 +15,12 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -895,7 +901,9 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
     else if (packet->getDestination() == nodeId) {
         bubble("I received a data packet for me!");
 
-        std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
+    std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
+    // Log final delivery path for DATA at destination
+    logDataDeliveryPath(packet);
 
         manageReceivedPacketForMe(packet);
         if (firstDataPacketReceptionTime == 0) {
@@ -1407,7 +1415,7 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         fullName += std::to_string(nodeId);
 
 
-        // Get the data from the first packet in the data buffer to send it
+    // Get the data from the first packet in the data buffer to send it
         dataPacket->setMsgType(LoRaPacketsToSend.front().getMsgType());
         dataPacket->setDataInt(LoRaPacketsToSend.front().getDataInt());
         dataPacket->setSource(LoRaPacketsToSend.front().getSource());
@@ -1423,7 +1431,10 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         fullName += std::to_string(dataPacket->getDestination());
         dataPacket->setName(fullName.c_str());
 
-        LoRaPacketsToSend.erase(LoRaPacketsToSend.begin());
+    // Initialize hopTrace with this transmitter
+    dataPacket->setHopTraceArraySize(1);
+    dataPacket->setHopTrace(0, nodeId);
+    LoRaPacketsToSend.erase(LoRaPacketsToSend.begin());
 
         transmit = true;
 
@@ -1479,6 +1490,11 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                     dataPacket->setByteLength(LoRaPacketsToForward.front().getByteLength());
                     dataPacket->setDepartureTime(LoRaPacketsToForward.front().getDepartureTime());
 
+                    // Carry over hopTrace and append this transmitter
+                    int old = LoRaPacketsToForward.front().getHopTraceArraySize();
+                    dataPacket->setHopTraceArraySize(old+1);
+                    for (int i=0;i<old;i++) dataPacket->setHopTrace(i, LoRaPacketsToForward.front().getHopTrace(i));
+                    dataPacket->setHopTrace(old, nodeId);
                     // Erase the first packet in the forwarding buffer
                     LoRaPacketsToForward.erase(LoRaPacketsToForward.begin());
 
@@ -1639,7 +1655,11 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             bubble("Drop duplicate RREQ");
             return; // drop duplicate
         }
-        aodvSeenRreqs.insert(key);
+    aodvSeenRreqs.insert(key);
+    // Track path hop at this node
+    int psz = rreq->getPathArraySize();
+    rreq->setPathArraySize(psz+1);
+    rreq->setPath(psz, nodeId);
 
     // Install/refresh reverse route to RREQ origin via last hop
         int src = rreq->getSrcId();
@@ -1679,6 +1699,8 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             innerRrep->setHopCount(0);
             innerRrep->setLifetime(routeTimeout.dbl());
             innerRrep->setByteLength(12);
+            innerRrep->setPathArraySize(1);
+            innerRrep->setPath(0, nodeId);
 
             LoRaAppPacket rrepEnv("AODV-RREP");
             rrepEnv.setMsgType(ROUTING);
@@ -1720,8 +1742,11 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             bubble("Drop RREP not for me");
             return; // not for me to forward
         }
-        // Log RREP reception event
+    // Log RREP reception event
         logRrepEvent("recv", rrep->getSrcId(), rrep->getDstId(), packet->getDestination(), packet->getVia(), -1, rrep->getHopCount());
+    int rps = rrep->getPathArraySize();
+    rrep->setPathArraySize(rps+1);
+    rrep->setPath(rps, nodeId);
     // Install/refresh forward route to destination (RREP source) via last hop
         int dest = rrep->getDstId(); // final destination of the path
     int via = packet->getLastHop();
@@ -1735,6 +1760,7 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
 
         if (packet->getDestination() == nodeId) {
             // RREP reached original source: flush buffered data
+            logRrepFinalPath(rrep);
             auto it = aodvBufferedData.find(dest);
             if (it != aodvBufferedData.end()) {
                 // Lock the first-hop next hop toward destination based on the reverse route just installed
@@ -1785,12 +1811,30 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
     }
 }
+// Log the full RREP path once it reaches the original source (this node)
+void LoRaNodeApp::logRrepFinalPath(const aodv::Rrep* rrep) {
+    if (!rrep) return;
+    try {
+        ensurePathsDir();
+        char path[512];
+        sprintf(path, "results/paths/rrep_path.csv");
+        bool writeHeader=false; { std::ifstream c(path); writeHeader=!c.good(); }
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) return;
+    if (writeHeader) out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount,path" << std::endl;
+    std::string p; int n = rrep->getPathArraySize();
+    for (int i=0;i<n;i++){ if(i) p+="-"; p+=std::to_string(rrep->getPath(i)); }
+    out << simTime() << ",final," << nodeId << "," << rrep->getSrcId() << "," << rrep->getDstId() << ",,,," << rrep->getHopCount() << "," << p << std::endl;
+        out.close();
+    } catch(...) {}
+}
 
-// Append an AODV RREQ arrival to a per-destination CSV in simulations/delivered_packets
+// Append an AODV RREQ arrival to CSV under results/paths
 void LoRaNodeApp::logRreqAtDestination(const aodv::Rreq* rreq) {
     try {
+        ensurePathsDir();
         char path[512];
-        sprintf(path, "simulations/delivered_packets/node_%d_rreq.csv", nodeId);
+        sprintf(path, "results/paths/rreq_path.csv");
         // Check if file exists
         bool writeHeader = false;
         {
@@ -1800,16 +1844,11 @@ void LoRaNodeApp::logRreqAtDestination(const aodv::Rreq* rreq) {
         std::ofstream out(path, std::ios::app);
         if (!out.is_open()) return;
         if (writeHeader) {
-            out << "simTime,receiverNodeId,srcId,dstId,bcastId,hopCount,srcSeq" << std::endl;
+            out << "simTime,atNode,srcId,dstId,bcastId,hopCount,srcSeq,path" << std::endl;
         }
-        out << simTime() << ","
-            << nodeId << ","
-            << rreq->getSrcId() << ","
-            << rreq->getDstId() << ","
-            << rreq->getBcastId() << ","
-            << rreq->getHopCount() << ","
-            << rreq->getSrcSeq()
-            << std::endl;
+        std::string p=""; int ps = rreq->getPathArraySize();
+        for (int i=0;i<ps;i++){ if(i) p+="-"; p+=std::to_string(rreq->getPath(i)); }
+        out << simTime() << "," << nodeId << "," << rreq->getSrcId() << "," << rreq->getDstId() << "," << rreq->getBcastId() << "," << rreq->getHopCount() << "," << rreq->getSrcSeq() << "," << p << std::endl;
         out.close();
     } catch (...) {
         // Ignore logging failures
@@ -1869,10 +1908,9 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
 // Unified logger for RREP events (reception / forwarding)
 void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount) {
     try {
-        // Ensure directory exists (best effort): OMNeT++ runs from project root, path relative
-        // (If directory creation is needed, could add platform-specific mkdir via system call, omitted for portability.)
+        ensurePathsDir();
         char path[512];
-        sprintf(path, "simulations/delivered_packets/rrep_forwarders.csv");
+        sprintf(path, "results/paths/rrep_path.csv");
         bool writeHeader = false;
         {
             std::ifstream check(path);
@@ -1884,9 +1922,9 @@ void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDs
             return;
         }
         if (writeHeader) {
-            out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount" << std::endl;
+            out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount,path" << std::endl;
         }
-        out << simTime() << "," << eventType << "," << nodeId << "," << originSrc << "," << finalDst << "," << envelopeDest << "," << envelopeVia << "," << nextHop << "," << hopCount << std::endl;
+        out << simTime() << "," << eventType << "," << nodeId << "," << originSrc << "," << finalDst << "," << envelopeDest << "," << envelopeVia << "," << nextHop << "," << hopCount << "," << "" << std::endl;
         out.close();
     } catch (...) {
         // swallow
@@ -1907,6 +1945,9 @@ void LoRaNodeApp::maybeStartDiscoveryFor(int destination) {
     innerRreq->setBcastId(aodvRreqSeq);
     innerRreq->setTtl(packetTTL);
     innerRreq->setByteLength(12);
+    // Seed path with originator
+    innerRreq->setPathArraySize(1);
+    innerRreq->setPath(0, nodeId);
 
     // Build envelope LoRa packet
     LoRaAppPacket rreqEnv("AODV-RREQ");
@@ -1973,6 +2014,11 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     forwardPacket->setByteLength(LoRaPacketsToForward.front().getByteLength());
                     forwardPacket->setDepartureTime(LoRaPacketsToForward.front().getDepartureTime());
 
+                    // Carry over hopTrace and append this transmitter
+                    int old = LoRaPacketsToForward.front().getHopTraceArraySize();
+                    forwardPacket->setHopTraceArraySize(old+1);
+                    for (int i=0;i<old;i++) forwardPacket->setHopTrace(i, LoRaPacketsToForward.front().getHopTrace(i));
+                    forwardPacket->setHopTrace(old, nodeId);
                     // Erase the first packet in the forwarding buffer
                     LoRaPacketsToForward.erase(LoRaPacketsToForward.begin());
 
@@ -2570,6 +2616,49 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
 
     const simtime_t duration = Tpreamble + Theader + Tpayload;
     return duration;
+}
+
+// Ensure results/paths directory exists for CSV outputs
+void LoRaNodeApp::ensurePathsDir() {
+#ifdef _WIN32
+    _mkdir("results");
+    _mkdir("results/paths");
+#else
+    struct stat st{};
+    if (stat("results", &st) != 0) { mkdir("results", 0755); }
+    if (stat("results/paths", &st) != 0) { mkdir("results/paths", 0755); }
+#endif
+}
+
+// Log final path of delivered DATA packets (only at final destination)
+void LoRaNodeApp::logDataDeliveryPath(const LoRaAppPacket* packet) {
+    if (!packet || packet->getMsgType() != DATA) return;
+    if (packet->getDestination() != nodeId) return;
+    try {
+        ensurePathsDir();
+        char path[512];
+        sprintf(path, "results/paths/data_path.csv");
+        bool writeHeader = false;
+        {
+            std::ifstream check(path);
+            writeHeader = !check.good();
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) return;
+        if (writeHeader) {
+            out << "simTime,srcId,dstId,len,hops,path" << std::endl;
+        }
+        std::string p;
+        int n = packet->getHopTraceArraySize();
+        for (int i = 0; i < n; ++i) {
+            if (i) p += "-";
+            p += std::to_string(packet->getHopTrace(i));
+        }
+        out << simTime() << "," << packet->getSource() << "," << packet->getDestination() << "," << packet->getByteLength() << "," << n << "," << p << std::endl;
+        out.close();
+    } catch (...) {
+        // ignore logging failures
+    }
 }
 
 simtime_t LoRaNodeApp::getTimeToNextRoutingPacket() {

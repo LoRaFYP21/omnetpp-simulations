@@ -65,4 +65,6 @@ packet LoRaAppPacket {
     int lastHop;
 	LoRaRoute routingTable[];
 	simtime_t departureTime;
+    // Delivery path trace: append nodeId at each transmitter and optionally receiver
+    int hopTrace[];
 }

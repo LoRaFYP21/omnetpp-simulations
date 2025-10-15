@@ -81,6 +81,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     simtime_t sendAodvPacket();
     // Log when an AODV RREQ reaches its destination (per-destination CSV)
     void logRreqAtDestination(const aodv::Rreq* rreq);
+    // Unified RREP hop/path logger
+    void logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount);
+    // Log final delivered data packet path
+    void logDataDeliveryPath(const LoRaAppPacket* packet);
+    // Log final RREP full path when it reaches the original source
+    void logRrepFinalPath(const aodv::Rrep* rrep);
+    // Ensure results/paths folder exists
+    void ensurePathsDir();
     // Safely (re)schedule selfPacket by cancelling if already scheduled
     inline void scheduleSelfAt(simtime_t t) {
         if (selfPacket) {
@@ -265,8 +273,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::map<int,int> aodvLockedNextHop;          // destinationId -> nextHop
     std::map<int, simtime_t> aodvLockedNextHopExpiry; // destinationId -> expiry time
 
-    // Helper to log RREP reception/forwarding events
-    void logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount);
+    // removed duplicate declaration
 
 
         //Application parameters
