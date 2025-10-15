@@ -2684,10 +2684,10 @@ void LoRaNodeApp::generateDataPackets() {
 
     if (!onlyNode0SendsPackets || nodeId == 0) {
         std::vector<int> destinations = { };
-        // If configured, force node 0 to send only to a specific destination
+        // If configured, force this node to send only to a specific destination (supports any node ID, including 1000/1001)
         bool forceSingleDestination = par("forceSingleDestination");
         int forcedDestinationId = par("forcedDestinationId");
-        if (forceSingleDestination && nodeId == 0 && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+        if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId != nodeId) {
             destinations.push_back(forcedDestinationId);
         } else {
             if (numberOfDestinationsPerNode == 0 )
