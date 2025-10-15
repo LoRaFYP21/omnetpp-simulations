@@ -47,6 +47,18 @@ namespace inet {
 
 Define_Module (LoRaNodeApp);
 
+// Helper: identify if this app instance belongs to an end node (host parameter iAmEnd=true)
+static inline bool isEndNodeHost(cSimpleModule* self) {
+    cModule *hostMod = getContainingNode(self);
+    if (!hostMod) return false;
+    if (!hostMod->hasPar("iAmEnd")) return false;
+    try {
+        return (bool)hostMod->par("iAmEnd");
+    } catch (...) {
+        return false;
+    }
+}
+
 void LoRaNodeApp::initialize(int stage) {
 
     cSimpleModule::initialize(stage);
@@ -75,7 +87,7 @@ void LoRaNodeApp::initialize(int stage) {
             cModule *hostMod = getContainingNode(this);
             bool isEnd = false;
             if (hostMod && hostMod->hasPar("iAmEnd")) {
-                isEnd = hostMod->par("iAmEnd").boolValue();
+                isEnd = hostMod->par("iAmEnd");
             } else {
                 // Fallback: try detecting by vector base name
                 cModule *parent = getParentModule();
@@ -86,6 +98,21 @@ void LoRaNodeApp::initialize(int stage) {
             }
             if (isEnd && routingMetric != 0) {
                 nodeId += 1000;
+            }
+        }
+
+        // Initialize expected convergence count using only relay nodes
+        // Do this once globally; end nodes do not contribute to the expected count
+        if (stopRoutingWhenAllConverged && globalNodesExpectingConvergence == 0) {
+            int relayCount = 0;
+            try {
+                // Parameter holds relay array size in our networks
+                relayCount = par("numberOfNodes");
+            } catch (...) {
+                relayCount = numberOfNodes; // fallback to member
+            }
+            if (relayCount > 0) {
+                globalNodesExpectingConvergence = relayCount;
             }
         }
 
@@ -891,7 +918,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     }
 
     // If global convergence reached, stop routing immediately in all nodes
-    if (stopRoutingWhenAllConverged && globalConvergedFired) {
+    if (globalConvergedFired) {
         routingPacketsDue = false;
     }
 
@@ -1165,6 +1192,14 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
         receivedRoutingPackets++;
 
     sanitizeRoutingTable();
+
+    // End-node advertise-only behavior: ignore routing table modifications to remain stateless
+    if (isEndNodeHost(this)) {
+        // Keep statistics/logging stable; just snapshot the (empty or static) table and return
+        routingTableSize.collect(singleMetricRoutingTable.size());
+        logRoutingSnapshot("routing_packet_ignored_endnode");
+        return;
+    }
 
         switch (routingMetric) {
 
@@ -1554,6 +1589,8 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
 
 // When this node reaches threshold the first time, bump the global counter and log
 void LoRaNodeApp::announceLocalConvergenceIfNeeded(int uniqueCount) {
+    // End nodes (iAmEnd=true) do not contribute to the global convergence count
+    if (isEndNodeHost(this)) return;
     if (locallyConverged) return;
     locallyConverged = true;
     // Increase shared count
@@ -1781,6 +1818,8 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
 }
 
 void LoRaNodeApp::manageReceivedPacketToForward(cMessage *msg) {
+    // End nodes operate as sources/sinks only; they do not forward others' packets
+    if (isEndNodeHost(this)) { delete msg; return; }
     receivedPacketsToForward++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
@@ -2411,6 +2450,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
 simtime_t LoRaNodeApp::sendRoutingPacket() {
     if (failed) return 0; // Do not send after failure
+    // If global convergence (based on relays) has been reached, stop sending routing beacons from all nodes
+    if (globalConvergedFired) return 0;
 
     bool transmit = false;
     simtime_t txDuration = 0;
