@@ -69,6 +69,25 @@ void LoRaNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+        // If this node is an end node and participates in routing (routingMetric != 0),
+        // offset its ID to 1000+ to avoid collisions with relay IDs.
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd").boolValue();
+            } else {
+                // Fallback: try detecting by vector base name
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName(); // "loRaNodes" or "loRaEndNodes"
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
 
         // Fresh path log per simulation run: have node 0 truncate and recreate header immediately
         if (nodeId == 0) {
@@ -432,8 +451,24 @@ void LoRaNodeApp::initialize(int stage) {
     openDeliveredCsv();
 
 
-        //Node identifier
+        //Node identifier (re-assign and apply end-node offset when participating in routing)
         nodeId = getContainingNode(this)->getIndex();
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd").boolValue();
+            } else {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -2413,27 +2448,33 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 
             transmit = true;
 
-            // Count the number of best routes
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
-                        numberOfRoutes++;
-                    }
+            // Build a unique set of destination IDs from the current routing table,
+            // so we can advertise ALL known destinations (including end-node IDs like 1000/1001),
+            // not only the relay index range [0..numberOfNodes-1].
+            {
+                std::set<int> destIds;
+                for (const auto &r : singleMetricRoutingTable) {
+                    if (r.id != nodeId)
+                        destIds.insert(r.id);
                 }
-            }
 
-            // Make room for numberOfRoutes routes
-            routingPacket->setRoutingTableArraySize(numberOfRoutes);
+                // Count the number of best routes among known destinations
+                for (int did : destIds) {
+                    if (getBestRouteIndexTo(did) >= 0)
+                        numberOfRoutes++;
+                }
 
-            // Add the best route to each node
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
+                // Make room for numberOfRoutes routes
+                routingPacket->setRoutingTableArraySize(numberOfRoutes);
 
+                // Add the best route for each known destination
+                for (int did : destIds) {
+                    int bestIdx = getBestRouteIndexTo(did);
+                    if (bestIdx >= 0) {
                         LoRaRoute thisLoRaRoute;
-                        thisLoRaRoute.setId(singleMetricRoutingTable[getBestRouteIndexTo(i)].id);
-                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[getBestRouteIndexTo(i)].metric);
-                        routingPacket->setRoutingTable(numberOfRoutes-1, thisLoRaRoute);
+                        thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
+                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
+                        routingPacket->setRoutingTable(numberOfRoutes - 1, thisLoRaRoute);
                         numberOfRoutes--;
                     }
                 }
