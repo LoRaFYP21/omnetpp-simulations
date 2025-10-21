@@ -1702,6 +1702,10 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             innerRrep->setPathArraySize(1);
             innerRrep->setPath(0, nodeId);
 
+            // Immediately log a 'create' event so rrep_path.csv exists even if forwarding later fails
+            // originSrc=src, finalDst=nodeId, envelopeDest=src, envelopeVia=parent, nextHop=parent, hopCount=0
+            logRrepEvent("create", src, nodeId, src, parent, parent, innerRrep->getHopCount());
+
             LoRaAppPacket rrepEnv("AODV-RREP");
             rrepEnv.setMsgType(ROUTING);
             rrepEnv.setSource(nodeId);
