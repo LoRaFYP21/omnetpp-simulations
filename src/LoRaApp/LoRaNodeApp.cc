@@ -47,6 +47,22 @@ namespace inet {
 
 Define_Module (LoRaNodeApp);
 
+// ---------------------------------------------------------------------------
+// Routing Metric Enum Mapping (documentation)
+// NO_FORWARDING (0)                : Node generates/receives only; no forwarding logic.
+// FLOODING_BROADCAST_SINGLE_SF (1) : Blind broadcast forwarding using a single SF.
+// SMART_BROADCAST_SINGLE_SF (2)    : Broadcast with additional heuristics (e.g., duplicate avoidance).
+// HOP_COUNT_SINGLE_SF (3)          : Single-metric table; metric = hop count (lower is better).
+// RSSI_SUM_SINGLE_SF (4)           : Single-metric; metric = sum of RSSI along path (higher raw RSSI -> lower derived cost assumed).
+// RSSI_PROD_SINGLE_SF (5)          : Single-metric; metric = product/aggregation of RSSI factors.
+// ETX_SINGLE_SF (6)                : Single-metric; metric = Expected Transmission Count (lower = more reliable path).
+// TIME_ON_AIR_HC_CAD_SF (11)       : Dual-metric; primary combines time-on-air + hop count + CAD attempts.
+// TIME_ON_AIR_SF_CAD_SF (12)       : Dual-metric; primary combines time-on-air + spreading factor + CAD attempts.
+// ---------------------------------------------------------------------------
+// NOTE: Comments in some .ini files previously labelled metric 3 as ETX; this
+// patch clarifies correct mapping where 3 = HOP_COUNT and 6 = ETX.
+// ---------------------------------------------------------------------------
+
 // Helper: identify if this app instance belongs to an end node (host parameter iAmEnd=true)
 static inline bool isEndNodeHost(cSimpleModule* self) {
     cModule *hostMod = getContainingNode(self);
@@ -770,8 +786,13 @@ void LoRaNodeApp::finish() {
     if (routingFrozenTime >= SIMTIME_ZERO)
         recordScalar("routingFrozenTime", routingFrozenTime);
 
-    // Export routing tables (CSV + TXT snapshot at end)
-    exportRoutingTables();
+    // Export detailed routing tables only if explicitly enabled.
+    // By default (parameter absent or false) we skip generating node_<id>_single.csv,
+    // node_<id>_dual.csv and node_<id>_routing_table.txt, keeping only live snapshot
+    // files node_<id>_routing.csv produced by logRoutingSnapshot().
+    if (hasPar("exportDetailedRoutingTables") && par("exportDetailedRoutingTables").boolValue()) {
+        exportRoutingTables();
+    }
 
     recordScalar("sentPackets", sentPackets);
     recordScalar("sentDataPackets", sentDataPackets);
@@ -822,7 +843,8 @@ void LoRaNodeApp::finish() {
     recordScalar("firstACKSF", firstACKSF);
 
     recordScalar("dataPacketsNotSent", LoRaPacketsToSend.size());
-    recordScalar("forwardPacketsNotSent", LoRaPacketsToSend.size());
+    // FIX: forwardPacketsNotSent previously (incorrectly) used LoRaPacketsToSend.size()
+    recordScalar("forwardPacketsNotSent", LoRaPacketsToForward.size());
 
     recordScalar("forwardBufferFull", forwardBufferFull);
     // Strict unicast scalars
@@ -830,28 +852,11 @@ void LoRaNodeApp::finish() {
     recordScalar("unicastWrongNextHopDrops", unicastWrongNextHopDrops);
     recordScalar("unicastFallbackBroadcasts", unicastFallbackBroadcasts);
 
-    for (std::vector<LoRaAppPacket>::iterator lbptr = LoRaPacketsToSend.begin();
-            lbptr < LoRaPacketsToSend.end(); lbptr++) {
-        LoRaPacketsToSend.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            LoRaPacketsToForward.begin(); lbptr < LoRaPacketsToForward.end();
-            lbptr++) {
-        LoRaPacketsToForward.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            LoRaPacketsForwarded.begin(); lbptr < LoRaPacketsForwarded.end();
-            lbptr++) {
-        LoRaPacketsForwarded.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            DataPacketsForMe.begin(); lbptr < DataPacketsForMe.end();
-            lbptr++) {
-        DataPacketsForMe.erase(lbptr);
-    }
+    // Replace unsafe erase-in-loop (iterator invalidation) with clear() operations.
+    LoRaPacketsToSend.clear();
+    LoRaPacketsToForward.clear();
+    LoRaPacketsForwarded.clear();
+    DataPacketsForMe.clear();
 
     recordScalar("dataPacketsForMeLatencyMax", dataPacketsForMeLatency.getMax());
     recordScalar("dataPacketsForMeLatencyMean", dataPacketsForMeLatency.getMean());
@@ -3097,6 +3102,13 @@ void LoRaNodeApp::performFailure() {
 
 void LoRaNodeApp::exportRoutingTables() {
     // Ensure directory exists (reuse logic similar to openRoutingCsv)
+#if 0
+    // Legacy unconditional export removed; now guarded at call site and here we provide
+    // an internal guard as a safety net. (Disabled block retained for reference.)
+#endif
+    if (!(hasPar("exportDetailedRoutingTables") && par("exportDetailedRoutingTables").boolValue())) {
+        return; // Skip generating extra routing table artifacts
+    }
 #ifdef _WIN32
     const char sep = '\\';
 #else
