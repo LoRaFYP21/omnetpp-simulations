@@ -82,6 +82,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void sendDownMgmtPacket();
         void generateDataPackets();
         void sanitizeRoutingTable();
+    // Destination filtering helper (optional behavior via parameters)
+    bool isAllowedDestinationId(int id) const;
     // When enabled (storeBestRouteOnly), ensure at most one route per destination id
     void addOrReplaceBestSingleRoute(const singleMetricRoute &candidate);
         int pickCADSF();
@@ -319,6 +321,12 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 simtime_t valid;
         };
         std::vector<dualMetricRoute> dualMetricRoutingTable;
+
+    // Optional routing table restriction: keep only entries for end nodes (e.g., IDs in [endIdMin,endIdMax])
+    bool keepOnlyEndDestinations = false; // parameter: **.LoRaNodeApp.keepOnlyEndDestinations
+    int endIdMin = 1000;                  // parameter: **.LoRaNodeApp.endIdMin
+    int endIdMax = 1001;                  // parameter: **.LoRaNodeApp.endIdMax
+    bool endNodesBroadcastData = false;   // parameter: **.LoRaNodeApp.endNodesBroadcastData
 
     // CSV logging state
     std::ofstream routingCsv;

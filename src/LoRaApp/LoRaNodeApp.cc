@@ -16,6 +16,7 @@
 #include <algorithm> // for std::max
 #include <set>
 #include <cstdio> // snprintf for dynamic event names
+#include <climits>
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -79,6 +80,16 @@ void LoRaNodeApp::initialize(int stage) {
 
     cSimpleModule::initialize(stage);
     routingMetric = par("routingMetric");
+
+    // Optional behavior flags (default: disabled)
+    if (hasPar("keepOnlyEndDestinations"))
+        keepOnlyEndDestinations = par("keepOnlyEndDestinations").boolValue();
+    if (hasPar("endIdMin"))
+        endIdMin = par("endIdMin");
+    if (hasPar("endIdMax"))
+        endIdMax = par("endIdMax");
+    if (hasPar("endNodesBroadcastData"))
+        endNodesBroadcastData = par("endNodesBroadcastData").boolValue();
 
     //Current network settings
     // numberOfNodes = par("numberOfNodes");
@@ -896,6 +907,12 @@ void LoRaNodeApp::finish() {
     // No persistent CSV stream; snapshots overwrite per write
 }
 
+// Return true if destination ID is allowed to be kept in routing tables
+bool LoRaNodeApp::isAllowedDestinationId(int id) const {
+    if (!keepOnlyEndDestinations) return true;
+    return id >= endIdMin && id <= endIdMax;
+}
+
 void LoRaNodeApp::handleMessage(cMessage *msg) {
     // If node already failed, drop everything except to process (already processed) failure event
     if (failed) {
@@ -1292,6 +1309,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                     LoRaRoute thisRoute = packet->getRoutingTable(i);
 
                     if (thisRoute.getId() != nodeId) {
+                        // If configured, keep only end-node destinations in [endIdMin, endIdMax]
+                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
+                            continue; // skip non-end destinations
+                        }
                         // Add new route
                         if (!isRouteInSingleMetricRoutingTable(thisRoute.getId(), packet->getSource())) {
                             EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << endl;
@@ -1376,6 +1397,9 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
                     if (thisRoute.getId() != nodeId ) {
                         // Add new route
+                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
+                            continue; // skip non-end destinations
+                        }
                         if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getVia(), packet->getOptions().getLoRaSF())) {
 //                            EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
                             dualMetricRoute newRoute;
@@ -1426,6 +1450,9 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
                     if (thisRoute.getId() != nodeId ) {
                         // Add new route
+                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
+                            continue; // skip non-end destinations
+                        }
                         if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getVia(), packet->getOptions().getLoRaSF())) {
 //                            EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
                             dualMetricRoute newRoute;
@@ -1456,8 +1483,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
         }
         routingTableSize.collect(singleMetricRoutingTable.size());
 
-        // Log snapshot after processing routing packet
-        logRoutingSnapshot("routing_packet_processed");
+    // Before logging, prune routing table (remove expired and non-end destinations if configured)
+    sanitizeRoutingTable();
+    // Log snapshot after processing routing packet
+    logRoutingSnapshot("routing_packet_processed");
     }
 
     EV << "## Routing table at node " << nodeId << "##" << endl;
@@ -1521,7 +1550,13 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
     if (firstTimeReached16 < SIMTIME_ZERO) {
         std::set<int> uniqueIds;
         for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
-        if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
+        // Compute effective threshold; clamp to allowed destination count when filtering is enabled
+        int effectiveThreshold = routingFreezeUniqueCount;
+        if (keepOnlyEndDestinations) {
+            int allowed = std::max(0, endIdMax - endIdMin + 1);
+            if (allowed > 0 && effectiveThreshold > allowed) effectiveThreshold = allowed;
+        }
+        if ((int)uniqueIds.size() >= effectiveThreshold) {
             firstTimeReached16 = simTime();
             // Lazy-open convergence CSV (node 0 creates header, others append)
             if (!convergenceCsvReady) {
@@ -1630,8 +1665,6 @@ void LoRaNodeApp::tryStopRoutingGlobally() {
     }
 }
 
-
-
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1640,12 +1673,6 @@ void LoRaNodeApp::openRoutingCsv() {
     const char sep = '/';
 #endif
     std::string folder = std::string("routing_tables");
-    // Try to create folder using C runtime; if it exists, ignore errors
-#ifdef _WIN32
-    _mkdir(folder.c_str());
-#else
-    mkdir(folder.c_str(), 0775);
-#endif
 
     // File name includes nodeId
     std::stringstream ss;
@@ -2968,7 +2995,8 @@ void LoRaNodeApp::sanitizeRoutingTable() {
             for (std::vector<singleMetricRoute>::iterator smr =
                     singleMetricRoutingTable.begin(); smr < singleMetricRoutingTable.end();
                     smr++) {
-                if (smr->valid < simTime()) {
+                // Remove expired routes or disallowed destinations
+                if (smr->valid < simTime() || !isAllowedDestinationId(smr->id)) {
                     singleMetricRoutingTable.erase(smr);
                     routeDeleted = true;
                     deletedRoutes++;
@@ -2985,7 +3013,7 @@ void LoRaNodeApp::sanitizeRoutingTable() {
             for (std::vector<dualMetricRoute>::iterator dmr =
                     dualMetricRoutingTable.begin(); dmr < dualMetricRoutingTable.end();
                     dmr++) {
-                if (dmr->valid < simTime()) {
+                if (dmr->valid < simTime() || !isAllowedDestinationId(dmr->id)) {
                     dualMetricRoutingTable.erase(dmr);
                     routeDeleted = true;
                     deletedRoutes++;

@@ -108,6 +108,12 @@ simple LoRaNodeApp
     // If true, once all participating nodes have a unique route to every destination (global convergence),
     // all nodes stop sending routing packets immediately.
     bool stopRoutingWhenAllConverged = default(true);
+        // Export controls: when true, also write detailed per-node routing tables (single/dual/txt)
+        bool exportDetailedRoutingTables = default(false);
+        // Keep routing table focused only on end-node destinations (IDs in [endIdMin, endIdMax])
+        bool keepOnlyEndDestinations = default(false);
+        int endIdMin = default(1000);
+        int endIdMax = default(1001);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
