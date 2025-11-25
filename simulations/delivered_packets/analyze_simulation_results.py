@@ -11,73 +11,84 @@ import sys
 import math
 
 def get_end_node_coordinates(simulations_dir="./"):
+    """Extract end node coordinates from .sca result files.
+    Returns dict: {1000: (x,y), 1001: (x,y)} when available.
+    Root cause fix: previous version mis-parsed module path (used parts[0] instead of parts[1]) so never matched end node patterns.
     """
-    Extract end node coordinates from scalar result files or configuration
-    Returns dict with node IDs as keys and (x, y) coordinates as values
-    """
-    coordinates = {}
-    
-    # Look for .sca files in results directory
+    coordinates: dict[int, list] = {}
+
     results_dir = os.path.join(simulations_dir, "results")
-    if not os.path.exists(results_dir):
+    if not os.path.isdir(results_dir):
         return coordinates
-    
+
     try:
-        # Find .sca files that might contain coordinate data
-        sca_files = [f for f in os.listdir(results_dir) if f.endswith('.sca') and 'End1000_to_End1001' in f]
-        if not sca_files:
-            # Try other recent files
-            sca_files = [f for f in os.listdir(results_dir) if f.endswith('.sca')]
-        
+        # Collect all .sca files (process all; coordinate scalars may appear in any)
+        sca_files = [os.path.join(results_dir, f) for f in os.listdir(results_dir) if f.endswith('.sca')]
         if not sca_files:
             return coordinates
-        
-        # Use the most recent file (or first one found)
-        sca_file = os.path.join(results_dir, sca_files[0])
-        
-        with open(sca_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                
-                # Look for scalar coordinate entries
-                if 'scalar' in line and ('CordiX' in line or 'CordiY' in line or 'positionX' in line or 'positionY' in line):
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        # Parse the module path to extract node ID
-                        module_path = parts[0]  # e.g., "LoRaMesh.loRaEndNodes[0].LoRaNodeApp"
-                        
-                        # Extract node information
-                        if 'loRaEndNodes[0]' in module_path:
-                            node_id = 1000
-                        elif 'loRaEndNodes[1]' in module_path:
-                            node_id = 1001
-                        else:
+
+        for sca_file in sca_files:
+            try:
+                with open(sca_file, 'r') as f:
+                    for line in f:
+                        if not line.startswith('scalar '):
                             continue
-                        
-                        coord_value = float(parts[-1])
-                        
+                        parts = line.strip().split()
+                        # Expected format: scalar <modulePath> <scalarName> <value>
+                        if len(parts) < 4:
+                            continue
+                        module_path = parts[1]
+                        scalar_name = parts[2]
+                        value_str = parts[3]
+                        if scalar_name not in ('CordiX', 'CordiY', 'positionX', 'positionY'):
+                            continue
+
+                        # Determine node id (end nodes indexed with +1000 offset)
+                        node_id = None
+                        if 'loRaEndNodes[' in module_path:
+                            # Extract index between brackets
+                            start = module_path.find('loRaEndNodes[') + len('loRaEndNodes[')
+                            end = module_path.find(']', start)
+                            if end != -1:
+                                try:
+                                    idx = int(module_path[start:end])
+                                    node_id = 1000 + idx
+                                except ValueError:
+                                    pass
+                        else:
+                            # Not an end node
+                            continue
+
+                        if node_id not in (1000, 1001):
+                            continue
+
+                        try:
+                            coord_val = float(value_str)
+                        except ValueError:
+                            continue
+
                         if node_id not in coordinates:
                             coordinates[node_id] = [None, None]
-                        
-                        if 'CordiX' in line or 'positionX' in line:
-                            coordinates[node_id][0] = coord_value
-                        elif 'CordiY' in line or 'positionY' in line:
-                            coordinates[node_id][1] = coord_value
-    
+                        if scalar_name in ('CordiX', 'positionX'):
+                            coordinates[node_id][0] = coord_val
+                        elif scalar_name in ('CordiY', 'positionY'):
+                            coordinates[node_id][1] = coord_val
+            except Exception as inner_e:
+                print(f"Warning: Failed reading {sca_file}: {inner_e}")
+
     except Exception as e:
-        print(f"Warning: Could not extract coordinates from scalar files: {e}")
-    
-    # If no coordinates found in scalars, try to extract from configuration hints
-    # End nodes use circle deployment with random placement
+        print(f"Warning: Could not scan results directory for .sca files: {e}")
+
+    # Notify if incomplete
+    for nid, (x, y) in list(coordinates.items()):
+        if x is None or y is None:
+            print(f"Info: Partial coordinates for node {nid} (x={x}, y={y})")
+
     if not coordinates:
         print("Note: End node coordinates not found in scalars (random circle deployment)")
         print("      Coordinates will be shown as estimated based on configuration")
-        
-        # For demonstration, we can note this in the report
-        # In a real scenario, you might extract from vector files or other sources
-    
-    return coordinates
 
+    return coordinates
 def calculate_distance(coord1, coord2):
     """Calculate Euclidean distance between two coordinates"""
     if coord1[0] is None or coord1[1] is None or coord2[0] is None or coord2[1] is None:
@@ -138,6 +149,10 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     # Basic statistics
     total_tx = len(tx_events)
     total_delivered = len(delivery_events)
+    # Initialize variables used later to avoid UnboundLocalError when sections are skipped
+    transit_times = []
+    transit_details = []
+    time_intervals = None
     
     # Prepare report content
     report_lines = []
@@ -269,8 +284,6 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     report_lines.append("-" * 50)
     
     if total_delivered > 0 and total_tx > 0:
-        transit_times = []
-        transit_details = []
         
         # Calculate transit time for each delivered packet
         for _, delivery in delivery_events.iterrows():
@@ -347,7 +360,7 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
         else:
             report_lines.append("POOR: Very low delivery success rate - major network problems")
         
-        if len(tx_events) > 1:
+        if len(tx_events) > 1 and time_intervals is not None:
             avg_interval = time_intervals.mean()
             if 8 <= avg_interval <= 12:
                 report_lines.append("TIMING: Transmission intervals within expected range (8-10s)")
