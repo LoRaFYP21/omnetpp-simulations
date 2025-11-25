@@ -8,6 +8,84 @@ import pandas as pd
 import os
 from datetime import datetime
 import sys
+import math
+
+def get_end_node_coordinates(simulations_dir="./"):
+    """
+    Extract end node coordinates from scalar result files or configuration
+    Returns dict with node IDs as keys and (x, y) coordinates as values
+    """
+    coordinates = {}
+    
+    # Look for .sca files in results directory
+    results_dir = os.path.join(simulations_dir, "results")
+    if not os.path.exists(results_dir):
+        return coordinates
+    
+    try:
+        # Find .sca files that might contain coordinate data
+        sca_files = [f for f in os.listdir(results_dir) if f.endswith('.sca') and 'End1000_to_End1001' in f]
+        if not sca_files:
+            # Try other recent files
+            sca_files = [f for f in os.listdir(results_dir) if f.endswith('.sca')]
+        
+        if not sca_files:
+            return coordinates
+        
+        # Use the most recent file (or first one found)
+        sca_file = os.path.join(results_dir, sca_files[0])
+        
+        with open(sca_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                
+                # Look for scalar coordinate entries
+                if 'scalar' in line and ('CordiX' in line or 'CordiY' in line or 'positionX' in line or 'positionY' in line):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        # Parse the module path to extract node ID
+                        module_path = parts[0]  # e.g., "LoRaMesh.loRaEndNodes[0].LoRaNodeApp"
+                        
+                        # Extract node information
+                        if 'loRaEndNodes[0]' in module_path:
+                            node_id = 1000
+                        elif 'loRaEndNodes[1]' in module_path:
+                            node_id = 1001
+                        else:
+                            continue
+                        
+                        coord_value = float(parts[-1])
+                        
+                        if node_id not in coordinates:
+                            coordinates[node_id] = [None, None]
+                        
+                        if 'CordiX' in line or 'positionX' in line:
+                            coordinates[node_id][0] = coord_value
+                        elif 'CordiY' in line or 'positionY' in line:
+                            coordinates[node_id][1] = coord_value
+    
+    except Exception as e:
+        print(f"Warning: Could not extract coordinates from scalar files: {e}")
+    
+    # If no coordinates found in scalars, try to extract from configuration hints
+    # End nodes use circle deployment with random placement
+    if not coordinates:
+        print("Note: End node coordinates not found in scalars (random circle deployment)")
+        print("      Coordinates will be shown as estimated based on configuration")
+        
+        # For demonstration, we can note this in the report
+        # In a real scenario, you might extract from vector files or other sources
+    
+    return coordinates
+
+def calculate_distance(coord1, coord2):
+    """Calculate Euclidean distance between two coordinates"""
+    if coord1[0] is None or coord1[1] is None or coord2[0] is None or coord2[1] is None:
+        return None
+    
+    dx = coord1[0] - coord2[0]
+    dy = coord1[1] - coord2[1]
+    return math.sqrt(dx * dx + dy * dy)
 
 def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", output_file=None):
     """
@@ -39,12 +117,23 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     # Start analysis
     print("Analyzing simulation results...")
     
-    # Filter for node 0 packets
-    node0_packets = df[df['src'] == 0]
+    # Extract end node coordinates
+    simulations_dir = os.path.dirname(os.path.dirname(paths_csv_file)) if "delivered_packets" in paths_csv_file else "./"
+    coordinates = get_end_node_coordinates(simulations_dir)
     
-    # Get transmission and delivery events
-    tx_events = node0_packets[node0_packets['event'] == 'TX_SRC']
-    delivery_events = node0_packets[node0_packets['event'] == 'DELIVERED']
+    # Calculate distance between end nodes
+    end_node_distance = None
+    if 1000 in coordinates and 1001 in coordinates:
+        coord_1000 = coordinates[1000]
+        coord_1001 = coordinates[1001]
+        end_node_distance = calculate_distance(coord_1000, coord_1001)
+    
+    # Filter for end node 1000 packets (source node after ID offset)
+    node1000_packets = df[df['src'] == 1000]
+    
+    # Get transmission and delivery events for end node 1000 → 1001 communication
+    tx_events = node1000_packets[node1000_packets['event'] == 'TX_SRC']
+    delivery_events = df[(df['event'] == 'DELIVERED') & (df['src'] == 1000) & (df['dst'] == 1001)]
     
     # Basic statistics
     total_tx = len(tx_events)
@@ -58,26 +147,39 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report_lines.append(f"Data Source: {paths_csv_file}")
     report_lines.append(f"Total Events Analyzed: {len(df)}")
+    
+    # Add end node distance information
+    if end_node_distance is not None:
+        report_lines.append(f"Distance between End Nodes 1000 and 1001: {end_node_distance:.2f} meters")
+        if 1000 in coordinates and 1001 in coordinates:
+            coord_1000 = coordinates[1000]
+            coord_1001 = coordinates[1001]
+            report_lines.append(f"End Node 1000 position: ({coord_1000[0]:.2f}, {coord_1000[1]:.2f})")
+            report_lines.append(f"End Node 1001 position: ({coord_1001[0]:.2f}, {coord_1001[1]:.2f})")
+    else:
+        report_lines.append("Distance between End Nodes: Not available")
+        report_lines.append("Note: End nodes use random circle deployment - coordinates not recorded in scalars")
+        report_lines.append("      Distance varies between simulation runs due to random placement")
+    
     report_lines.append("")
     
     # 1. PACKET TRANSMISSION STATISTICS
-    report_lines.append("1. PACKET TRANSMISSION STATISTICS FROM NODE 0")
+    report_lines.append("1. PACKET TRANSMISSION STATISTICS FROM END NODE 1000")
     report_lines.append("-" * 50)
     report_lines.append(f"Total data packets transmitted: {total_tx}")
     
     if total_tx > 0:
-        # Packets per destination
+        # Packets per destination - expecting destination 1001 for end-to-end communication
         dest_counts = tx_events['dst'].value_counts().sort_index()
         unique_destinations = len(dest_counts)
         
         report_lines.append(f"Number of unique destinations: {unique_destinations}")
-        report_lines.append(f"Expected destinations (1-49): 49 nodes")
+        report_lines.append(f"Expected destination for end-to-end test: 1001")
         
-        if unique_destinations == 49:
-            report_lines.append("SUCCESS: Transmitted to all expected destinations")
+        if 1001 in dest_counts.index:
+            report_lines.append("SUCCESS: Transmitted to expected destination (1001)")
         else:
-            missing_dests = set(range(1, 50)) - set(dest_counts.index)
-            report_lines.append(f"WARNING: Missing destinations: {sorted(list(missing_dests))}")
+            report_lines.append(f"WARNING: Expected destination 1001 not found in transmission list")
         
         report_lines.append("")
         report_lines.append("Packets sent per destination:")
@@ -108,8 +210,11 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
         reachable_count = len(delivered_destinations)
         reachable_nodes = sorted(list(delivered_destinations))
         
-        report_lines.append(f"Number of nodes that received packets: {reachable_count}/49")
-        report_lines.append(f"Node reachability: {(reachable_count/49)*100:.1f}%")
+        report_lines.append(f"Destinations that received packets: {reachable_count}")
+        if 1001 in delivered_destinations:
+            report_lines.append("SUCCESS: End node 1001 successfully received packets")
+        else:
+            report_lines.append("WARNING: End node 1001 did not receive packets")
         report_lines.append("")
         
         report_lines.append("REACHABLE NODES:")
@@ -275,12 +380,15 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
         
         # Print key summary to console
         print("\nKEY FINDINGS:")
+        if end_node_distance is not None:
+            print(f"• Distance between end nodes 1000 and 1001: {end_node_distance:.2f}m")
         if total_tx > 0:
-            print(f"• Packets transmitted: {total_tx}")
+            print(f"• Packets transmitted from end node 1000: {total_tx}")
             print(f"• Delivery success rate: {(total_delivered/total_tx)*100:.1f}%")
             if total_delivered > 0:
-                reachable_count = len(set(delivery_events['dst'].unique()))
-                print(f"• Reachable nodes: {reachable_count}/49 ({(reachable_count/49)*100:.1f}%)")
+                print(f"• End node 1001 successfully received {total_delivered} packet(s)")
+            else:
+                print(f"• End node 1001 did NOT receive any packets")
             if transit_times:
                 print(f"• Max transit time: {max(transit_times):.3f}s")
         

@@ -54,6 +54,7 @@ void LoRaEndNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+        originalNodeIndex = nodeId;  // Store original index before offset
         std::pair<double, double> coordsValues = std::make_pair(-1, -1);
         cModule *host = getContainingNode(this);
 
@@ -1704,7 +1705,7 @@ simtime_t LoRaEndNodeApp::sendRoutingPacket() {
 
 void LoRaEndNodeApp::generateDataPackets() {
 
-    if (!onlyNode0SendsPackets || nodeId == 0) {
+    if (!onlyNode0SendsPackets || originalNodeIndex == 0) {
         std::vector<int> destinations = { };
 
         if (numberOfDestinationsPerNode == 0 )

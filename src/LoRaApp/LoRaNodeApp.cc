@@ -16,7 +16,7 @@
 #include <algorithm> // for std::max
 #include <set>
 #include <cstdio> // snprintf for dynamic event names
-#include <climits>
+#include <climits> // INT_MAX for end-node filtering
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -81,16 +81,6 @@ void LoRaNodeApp::initialize(int stage) {
     cSimpleModule::initialize(stage);
     routingMetric = par("routingMetric");
 
-    // Optional behavior flags (default: disabled)
-    if (hasPar("keepOnlyEndDestinations"))
-        keepOnlyEndDestinations = par("keepOnlyEndDestinations").boolValue();
-    if (hasPar("endIdMin"))
-        endIdMin = par("endIdMin");
-    if (hasPar("endIdMax"))
-        endIdMax = par("endIdMax");
-    if (hasPar("endNodesBroadcastData"))
-        endNodesBroadcastData = par("endNodesBroadcastData").boolValue();
-
     //Current network settings
     // numberOfNodes = par("numberOfNodes");
     // std::cout << "numberOfNodes: " << numberOfNodes << std::endl;
@@ -108,6 +98,7 @@ void LoRaNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+        originalNodeIndex = nodeId;  // Store original index before offset
         // If this node is an end node and participates in routing (routingMetric != 0),
         // offset its ID to 1000+ to avoid collisions with relay IDs.
         {
@@ -907,12 +898,6 @@ void LoRaNodeApp::finish() {
     // No persistent CSV stream; snapshots overwrite per write
 }
 
-// Return true if destination ID is allowed to be kept in routing tables
-bool LoRaNodeApp::isAllowedDestinationId(int id) const {
-    if (!keepOnlyEndDestinations) return true;
-    return id >= endIdMin && id <= endIdMax;
-}
-
 void LoRaNodeApp::handleMessage(cMessage *msg) {
     // If node already failed, drop everything except to process (already processed) failure event
     if (failed) {
@@ -1219,6 +1204,19 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     if (isEndNodeHost(this)) {
         // Keep statistics/logging stable; just snapshot the (empty or static) table and return
         routingTableSize.collect(singleMetricRoutingTable.size());
+
+    // ------------------------------------------------------------------
+    // FILTER: Retain only routes that lead to end nodes (IDs >= 1000).
+    // Requirement: Relay nodes should keep ONLY routes to end nodes
+    // (e.g., 1000, 1001) and discard intermediate relay destinations.
+    // End node IDs are offset by +1000 earlier during initialization.
+    // We derive end node range from numberOfEndNodes parameter if present;
+    // fallback: assume any id >= 1000 is an end node.
+    // ------------------------------------------------------------------
+    filterRoutesToEndNodes();
+
+    // After filtering, collect the (reduced) size again to reflect final table
+    routingTableSize.collect(singleMetricRoutingTable.size());
         logRoutingSnapshot("routing_packet_ignored_endnode");
         return;
     }
@@ -1309,10 +1307,6 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                     LoRaRoute thisRoute = packet->getRoutingTable(i);
 
                     if (thisRoute.getId() != nodeId) {
-                        // If configured, keep only end-node destinations in [endIdMin, endIdMax]
-                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
-                            continue; // skip non-end destinations
-                        }
                         // Add new route
                         if (!isRouteInSingleMetricRoutingTable(thisRoute.getId(), packet->getSource())) {
                             EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << endl;
@@ -1397,9 +1391,6 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
                     if (thisRoute.getId() != nodeId ) {
                         // Add new route
-                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
-                            continue; // skip non-end destinations
-                        }
                         if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getVia(), packet->getOptions().getLoRaSF())) {
 //                            EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
                             dualMetricRoute newRoute;
@@ -1450,9 +1441,6 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
                     if (thisRoute.getId() != nodeId ) {
                         // Add new route
-                        if (keepOnlyEndDestinations && !isAllowedDestinationId(thisRoute.getId())) {
-                            continue; // skip non-end destinations
-                        }
                         if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getVia(), packet->getOptions().getLoRaSF())) {
 //                            EV << "Adding route to node " << thisRoute.getId() << " via " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
                             dualMetricRoute newRoute;
@@ -1480,12 +1468,15 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             default:
                 break;
-        }
-        routingTableSize.collect(singleMetricRoutingTable.size());
+    }
 
-    // Before logging, prune routing table (remove expired and non-end destinations if configured)
-    sanitizeRoutingTable();
-    // Log snapshot after processing routing packet
+    // Enforce relay-side filtering: keep only end-node destinations in tables
+    // before collecting size and logging the snapshot. This ensures
+    // node_X_routing.csv reflects only end-node routes (e.g., 1000, 1001).
+    filterRoutesToEndNodes();
+    routingTableSize.collect(singleMetricRoutingTable.size());
+
+    // Log snapshot after processing routing packet (post-filtering)
     logRoutingSnapshot("routing_packet_processed");
     }
 
@@ -1550,13 +1541,7 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
     if (firstTimeReached16 < SIMTIME_ZERO) {
         std::set<int> uniqueIds;
         for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
-        // Compute effective threshold; clamp to allowed destination count when filtering is enabled
-        int effectiveThreshold = routingFreezeUniqueCount;
-        if (keepOnlyEndDestinations) {
-            int allowed = std::max(0, endIdMax - endIdMin + 1);
-            if (allowed > 0 && effectiveThreshold > allowed) effectiveThreshold = allowed;
-        }
-        if ((int)uniqueIds.size() >= effectiveThreshold) {
+        if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
             firstTimeReached16 = simTime();
             // Lazy-open convergence CSV (node 0 creates header, others append)
             if (!convergenceCsvReady) {
@@ -1665,6 +1650,8 @@ void LoRaNodeApp::tryStopRoutingGlobally() {
     }
 }
 
+
+
 void LoRaNodeApp::openRoutingCsv() {
     // Build folder and file name: simulations folder is the working dir; create "routing_tables" subfolder
 #ifdef _WIN32
@@ -1673,6 +1660,12 @@ void LoRaNodeApp::openRoutingCsv() {
     const char sep = '/';
 #endif
     std::string folder = std::string("routing_tables");
+    // Try to create folder using C runtime; if it exists, ignore errors
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
 
     // File name includes nodeId
     std::stringstream ss;
@@ -2521,6 +2514,9 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 
             transmit = true;
 
+            // Ensure we advertise only end-node routes (strip others first)
+            filterRoutesToEndNodes();
+
             // Build a unique set of destination IDs from the current routing table,
             // so we can advertise ALL known destinations (including end-node IDs like 1000/1001),
             // not only the relay index range [0..numberOfNodes-1].
@@ -2558,6 +2554,9 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
         case TIME_ON_AIR_HC_CAD_SF:
         case TIME_ON_AIR_SF_CAD_SF:
             transmit = true;
+
+            // Ensure we advertise only end-node routes (strip others first)
+            filterRoutesToEndNodes();
 
             loRaSF = pickCADSF();
             cInfo->setLoRaSF(loRaSF);
@@ -2714,7 +2713,7 @@ simtime_t LoRaNodeApp::sendAckPacket(int destinationNode, int originalDataSeq) {
 void LoRaNodeApp::generateDataPackets() {
     if (failed) return; // Do not generate after failure
 
-    if (!onlyNode0SendsPackets || nodeId == 0) {
+    if (!onlyNode0SendsPackets || originalNodeIndex == 0) {
         std::vector<int> destinations = { };
         // If configured, force this node to send only to a specific destination (supports any node ID, including 1000/1001)
         bool forceSingleDestination = par("forceSingleDestination");
@@ -2982,6 +2981,51 @@ int LoRaNodeApp::getBestRouteIndexTo(int destination) {
     return -1;
 }
 
+// ---------------------------------------------------------------
+// Helper: Remove any routing entries that do NOT correspond to end
+// nodes. End nodes have been offset to IDs >= 1000. We optionally
+// detect an upper bound if parameter 'numberOfEndNodes' exists.
+// ---------------------------------------------------------------
+void LoRaNodeApp::filterRoutesToEndNodes() {
+    // Skip if already frozen AND table only contains end nodes (fast path)
+    bool allEnd = true;
+    for (const auto &r : singleMetricRoutingTable) {
+        if (r.id < 1000) { allEnd = false; break; }
+    }
+    if (allEnd && routingFrozen) return;
+
+    int endCount = -1;
+    if (hasPar("numberOfEndNodes")) {
+        try { endCount = par("numberOfEndNodes"); } catch (...) { endCount = -1; }
+    }
+    int endMin = 1000;
+    int endMax = (endCount > 0) ? (endMin + endCount - 1) : INT_MAX;
+
+    // Single metric filtering
+    if (!singleMetricRoutingTable.empty()) {
+        std::vector<singleMetricRoute> filtered;
+        filtered.reserve(singleMetricRoutingTable.size());
+        for (const auto &r : singleMetricRoutingTable) {
+            if (r.id >= endMin && r.id <= endMax) {
+                filtered.push_back(r);
+            }
+        }
+        singleMetricRoutingTable.swap(filtered);
+    }
+
+    // Dual metric filtering
+    if (!dualMetricRoutingTable.empty()) {
+        std::vector<dualMetricRoute> filtered2;
+        filtered2.reserve(dualMetricRoutingTable.size());
+        for (const auto &r : dualMetricRoutingTable) {
+            if (r.id >= endMin && r.id <= endMax) {
+                filtered2.push_back(r);
+            }
+        }
+        dualMetricRoutingTable.swap(filtered2);
+    }
+}
+
 void LoRaNodeApp::sanitizeRoutingTable() {
     // When frozen, keep tables intact
     if (routingFrozen) return;
@@ -2995,8 +3039,7 @@ void LoRaNodeApp::sanitizeRoutingTable() {
             for (std::vector<singleMetricRoute>::iterator smr =
                     singleMetricRoutingTable.begin(); smr < singleMetricRoutingTable.end();
                     smr++) {
-                // Remove expired routes or disallowed destinations
-                if (smr->valid < simTime() || !isAllowedDestinationId(smr->id)) {
+                if (smr->valid < simTime()) {
                     singleMetricRoutingTable.erase(smr);
                     routeDeleted = true;
                     deletedRoutes++;
@@ -3013,7 +3056,7 @@ void LoRaNodeApp::sanitizeRoutingTable() {
             for (std::vector<dualMetricRoute>::iterator dmr =
                     dualMetricRoutingTable.begin(); dmr < dualMetricRoutingTable.end();
                     dmr++) {
-                if (dmr->valid < simTime() || !isAllowedDestinationId(dmr->id)) {
+                if (dmr->valid < simTime()) {
                     dualMetricRoutingTable.erase(dmr);
                     routeDeleted = true;
                     deletedRoutes++;

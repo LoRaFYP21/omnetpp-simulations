@@ -6,8 +6,92 @@ Generates detailed report for LoRa mesh network simulation results
 
 import pandas as pd
 import os
+import glob
+import math
 from datetime import datetime
 import sys
+
+def extract_node_id(module_name):
+    """Extract node ID from OMNeT++ module name"""
+    # Module names can be like "LoRaWAN.loRaNodes[1]" or "LoRaWAN.loRaEndNodes[0]"
+    if '[' in module_name and ']' in module_name:
+        start = module_name.find('[') + 1
+        end = module_name.find(']')
+        base_id = int(module_name[start:end])
+        
+        # End nodes have ID offset of 1000
+        if 'loRaEndNodes' in module_name:
+            return base_id + 1000
+        else:
+            return base_id
+    return None
+
+def get_end_node_coordinates():
+    """Extract coordinates of end nodes 1000 and 1001 from scalar result files"""
+    coordinates = {}
+    
+    # Try to find result files with end node data
+    result_patterns = [
+        "results/*End1000*.sca",
+        "results/*End1001*.sca", 
+        "results/*1000*.sca",
+        "results/*1001*.sca",
+        "../results/*End1000*.sca",
+        "../results/*End1001*.sca",
+        "../results/*1000*.sca", 
+        "../results/*1001*.sca"
+    ]
+    
+    for pattern in result_patterns:
+        for file_path in glob.glob(pattern):
+            print(f"Found result file: {file_path}")
+            try:
+                with open(file_path, 'r') as f:
+                    content = f.read()
+                    lines = content.strip().split('\n')
+                    
+                    for line in lines:
+                        if line.startswith('scalar'):
+                            parts = line.split()
+                            if len(parts) >= 4:  # Need at least module, scalar name, and value
+                                module_name = parts[1]
+                                scalar_name = parts[2]
+                                scalar_value = parts[3]
+                                
+                                print(f"Processing scalar: {module_name} {scalar_name} {scalar_value}")
+                                
+                                # Look for coordinate scalars
+                                # End nodes use positionX/positionY, relay nodes use CordiX/CordiY
+                                if scalar_name in ['positionX', 'CordiX']:
+                                    node_id = extract_node_id(module_name)
+                                    print(f"Found X coordinate for node {node_id}: {scalar_value}")
+                                    if node_id in [1000, 1001]:
+                                        if node_id not in coordinates:
+                                            coordinates[node_id] = {}
+                                        coordinates[node_id]['x'] = float(scalar_value)
+                                        
+                                elif scalar_name in ['positionY', 'CordiY']:
+                                    node_id = extract_node_id(module_name)
+                                    print(f"Found Y coordinate for node {node_id}: {scalar_value}")
+                                    if node_id in [1000, 1001]:
+                                        if node_id not in coordinates:
+                                            coordinates[node_id] = {}
+                                        coordinates[node_id]['y'] = float(scalar_value)
+                                        
+            except Exception as e:
+                print(f"Error reading file {file_path}: {e}")
+                continue
+    
+    return coordinates
+
+def calculate_distance(coord1, coord2):
+    """Calculate Euclidean distance between two coordinates"""
+    if 'x' not in coord1 or 'y' not in coord1 or 'x' not in coord2 or 'y' not in coord2:
+        return None
+    
+    dx = coord1['x'] - coord2['x']
+    dy = coord1['y'] - coord2['y']
+    return math.sqrt(dx*dx + dy*dy)
 
 def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", output_file=None):
     """
@@ -39,12 +123,25 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     # Start analysis
     print("Analyzing simulation results...")
     
-    # Filter for node 0 packets
-    node0_packets = df[df['src'] == 0]
+    # Filter for node 1000 packets (end node 0 has ID 1000)
+    node1000_packets = df[df['src'] == 1000]
     
-    # Get transmission and delivery events
-    tx_events = node0_packets[node0_packets['event'] == 'TX_SRC']
-    delivery_events = node0_packets[node0_packets['event'] == 'DELIVERED']
+    # Get transmission and delivery events for 1000 -> 1001 communication
+    tx_events = node1000_packets[node1000_packets['event'] == 'TX_SRC']
+    delivery_events = node1000_packets[node1000_packets['event'] == 'DELIVERED']
+    
+    # Extract coordinates and calculate distance between end nodes
+    coordinates = get_end_node_coordinates()
+    distance_text = ""
+    if 1000 in coordinates and 1001 in coordinates:
+        distance = calculate_distance(coordinates[1000], coordinates[1001])
+        if distance is not None:
+            distance_text = f"Distance between End Nodes 1000 and 1001: {distance:.2f} meters"
+        else:
+            distance_text = "Distance calculation failed: incomplete coordinate data"
+    else:
+        available_coords = list(coordinates.keys())
+        distance_text = f"Coordinates not found for end nodes. Available coordinates: {available_coords}"
     
     # Basic statistics
     total_tx = len(tx_events)
@@ -58,37 +155,33 @@ def analyze_simulation_results(paths_csv_file="delivered_packets/paths.csv", out
     report_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report_lines.append(f"Data Source: {paths_csv_file}")
     report_lines.append(f"Total Events Analyzed: {len(df)}")
+    report_lines.append(f"Communication Pattern: End Node 1000 -> End Node 1001")
+    report_lines.append(f"{distance_text}")
     report_lines.append("")
     
     # 1. PACKET TRANSMISSION STATISTICS
-    report_lines.append("1. PACKET TRANSMISSION STATISTICS FROM NODE 0")
+    report_lines.append("1. PACKET TRANSMISSION STATISTICS FROM END NODE 1000")
     report_lines.append("-" * 50)
     report_lines.append(f"Total data packets transmitted: {total_tx}")
     
     if total_tx > 0:
-        # Packets per destination
+        # Packets per destination (should mostly be 1001)
         dest_counts = tx_events['dst'].value_counts().sort_index()
         unique_destinations = len(dest_counts)
         
         report_lines.append(f"Number of unique destinations: {unique_destinations}")
-        report_lines.append(f"Expected destinations (1-49): 49 nodes")
+        report_lines.append(f"Expected destination: End Node 1001")
         
-        if unique_destinations == 49:
-            report_lines.append("SUCCESS: Transmitted to all expected destinations")
+        if 1001 in dest_counts:
+            packets_to_1001 = dest_counts[1001]
+            report_lines.append(f"Packets sent to End Node 1001: {packets_to_1001}")
         else:
-            missing_dests = set(range(1, 50)) - set(dest_counts.index)
-            report_lines.append(f"WARNING: Missing destinations: {sorted(list(missing_dests))}")
-        
+            report_lines.append("WARNING: No packets sent to End Node 1001")
+            
         report_lines.append("")
         report_lines.append("Packets sent per destination:")
-        
-        # Group destinations for readable output
-        for i in range(0, len(dest_counts), 10):
-            chunk = dest_counts.iloc[i:i+10]
-            line_parts = []
-            for dest, count in chunk.items():
-                line_parts.append(f"Node {dest:2d}:{count}")
-            report_lines.append("  " + "  ".join(line_parts))
+        for dest, count in dest_counts.items():
+            report_lines.append(f"  Node {dest}: {count} packets")
     
     report_lines.append("")
     
