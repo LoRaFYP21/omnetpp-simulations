@@ -49,6 +49,97 @@ def find_latest_results_directory(base_dir="./"):
     print(f"Using results directory: {latest_dir[0]} ({latest_dir[2]} .sca files, modified: {datetime.fromtimestamp(latest_dir[1])})")
     return latest_dir[0]
 
+def save_coordinates_to_csv(coordinates, csv_path="delivered_packets/endnode_positions.csv"):
+    """
+    Save extracted coordinates to CSV file for future reference.
+    Appends new data without duplicating if same run already exists.
+    """
+    try:
+        import os
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        
+        # Check if file exists and read existing data
+        file_exists = os.path.exists(csv_path)
+        existing_data = []
+        
+        if file_exists:
+            try:
+                with open(csv_path, 'r') as f:
+                    existing_data = f.readlines()
+            except:
+                pass
+        
+        # Write/append data
+        with open(csv_path, 'w') as f:
+            # Write header
+            f.write("timestamp,node_id,position_x,position_y,source_file,extraction_time\n")
+            
+            # Write existing data (skip header)
+            if len(existing_data) > 1:
+                for line in existing_data[1:]:
+                    f.write(line)
+            
+            # Write new coordinates
+            extraction_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            for node_id, coords in sorted(coordinates.items()):
+                if 'x' in coords and 'y' in coords:
+                    timestamp = coords.get('timestamp', 0.0)
+                    source_file = coords.get('source_file', 'unknown')
+                    f.write(f"{timestamp},{node_id},{coords['x']},{coords['y']},{source_file},{extraction_time}\n")
+        
+        return True
+    except Exception as e:
+        print(f"Warning: Could not save to CSV: {e}")
+        return False
+
+def extract_end_node_coordinates_from_csv(csv_path="endnode_positions.csv"):
+    """
+    Extract end node coordinates from CSV file written by simulation.
+    Returns the MOST RECENT coordinates for nodes 1000 and 1001.
+    """
+    coordinates = {}
+    extraction_info = {
+        'source': 'CSV',
+        'csv_file': csv_path,
+        'rows_read': 0,
+        'coordinates_extracted': 0
+    }
+    
+    if not os.path.exists(csv_path):
+        extraction_info['error'] = f"CSV file not found: {csv_path}"
+        return coordinates, extraction_info
+    
+    try:
+        # Read CSV and get the most recent entry for each end node
+        df = pd.read_csv(csv_path)
+        extraction_info['rows_read'] = len(df)
+        
+        # Filter for end nodes 1000 and 1001
+        end_nodes = df[df['node_id'].isin([1000, 1001])]
+        
+        # Get the most recent position for each node (by timestamp)
+        for node_id in [1000, 1001]:
+            node_data = end_nodes[end_nodes['node_id'] == node_id]
+            if not node_data.empty:
+                # Get the last (most recent) entry
+                latest = node_data.iloc[-1]
+                coordinates[node_id] = {
+                    'x': latest['position_x'],
+                    'y': latest['position_y'],
+                    'timestamp': latest['timestamp'],
+                    'config': latest.get('config_name', 'unknown'),
+                    'run': latest.get('run_number', 'unknown')
+                }
+                extraction_info['coordinates_extracted'] += 2
+        
+        if coordinates:
+            extraction_info['latest_timestamp'] = max(c['timestamp'] for c in coordinates.values())
+            
+    except Exception as e:
+        extraction_info['error'] = f"Error reading CSV: {e}"
+    
+    return coordinates, extraction_info
+
 def extract_end_node_coordinates(results_dir):
     """
     Extract end node coordinates from the most recent .sca files.
@@ -59,7 +150,8 @@ def extract_end_node_coordinates(results_dir):
         'files_scanned': 0,
         'scalars_found': 0,
         'coordinates_extracted': 0,
-        'source_file': None
+        'source_file': None,
+        'results_dir': results_dir
     }
     
     if not results_dir or not os.path.isdir(results_dir):
@@ -69,8 +161,10 @@ def extract_end_node_coordinates(results_dir):
     sca_files = glob.glob(os.path.join(results_dir, "*.sca"))
     sca_files.sort(key=os.path.getmtime, reverse=True)
     
+    # Read ONLY the most recent file to get current run's coordinates
     for sca_file in sca_files:
         extraction_info['files_scanned'] += 1
+        found_coords = False
         
         try:
             with open(sca_file, 'r') as f:
@@ -117,18 +211,28 @@ def extract_end_node_coordinates(results_dir):
                     
                     if scalar_name in ('CordiX', 'positionX'):
                         coordinates[node_id]['x'] = coord_val
+                        coordinates[node_id]['source_file'] = os.path.basename(sca_file)
+                        coordinates[node_id]['timestamp'] = 0.0  # Will be updated if we find it in .sca
                         extraction_info['coordinates_extracted'] += 1
+                        found_coords = True
                         if not extraction_info['source_file']:
                             extraction_info['source_file'] = os.path.basename(sca_file)
                     elif scalar_name in ('CordiY', 'positionY'):
                         coordinates[node_id]['y'] = coord_val
+                        coordinates[node_id]['source_file'] = os.path.basename(sca_file)
+                        coordinates[node_id]['timestamp'] = 0.0
                         extraction_info['coordinates_extracted'] += 1
+                        found_coords = True
                         if not extraction_info['source_file']:
                             extraction_info['source_file'] = os.path.basename(sca_file)
                     
         except Exception as e:
             print(f"Warning: Error reading {sca_file}: {e}")
             continue
+        
+        # Stop after finding coordinates in the first (newest) file
+        if found_coords and len(coordinates) == 2:
+            break
     
     # Filter out incomplete coordinates
     complete_coords = {}
@@ -238,7 +342,9 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     # SECTION 1: COORDINATE EXTRACTION STATUS
     report_lines.append("1. COORDINATE EXTRACTION STATUS")
     report_lines.append("-" * 50)
-    report_lines.append(f"Results directory: {extraction_info.get('source_file', 'Not found')}")
+    report_lines.append(f"Results directory: {extraction_info.get('results_dir', 'Not found')}")
+    if extraction_info.get('source_file'):
+        report_lines.append(f"Most recent scalar file: {extraction_info.get('source_file')}")
     report_lines.append(f"Files scanned: {extraction_info['files_scanned']}")
     report_lines.append(f"Scalar entries found: {extraction_info['scalars_found']}")
     report_lines.append(f"Coordinates extracted: {extraction_info['coordinates_extracted']}")
@@ -399,6 +505,8 @@ def main():
                        help='Output report filename (auto-generated if not specified)')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
+    parser.add_argument('--just-distance', action='store_true',
+                       help='Print only end-node distance and exit')
     
     args = parser.parse_args()
     
@@ -416,24 +524,37 @@ def main():
         print(f"ERROR loading CSV: {e}")
         return 1
     
-    # Find results directory
-    if args.results_dir:
-        results_dir = args.results_dir
-    else:
-        results_dir = find_latest_results_directory()
+    # Extract coordinates from .sca files
+    results_dir = args.results_dir or find_latest_results_directory()
     
     if not results_dir:
-        print("WARNING: No results directory with .sca files found!")
-        print("Distance calculation will not be available.")
-        coordinates = {}
-        extraction_info = {'files_scanned': 0, 'scalars_found': 0, 'coordinates_extracted': 0}
-    else:
-        # Extract coordinates
-        coordinates, extraction_info = extract_end_node_coordinates(results_dir)
-        
-        if args.verbose:
-            print(f"Coordinate extraction: {extraction_info}")
+        print("ERROR: No results directory found with .sca files!")
+        print("Run a simulation first to generate result files.")
+        return 1
     
+    print(f"Extracting end node positions from .sca files...")
+    coordinates, extraction_info = extract_end_node_coordinates(results_dir)
+    
+    if args.verbose:
+        print(f"CSV extraction: {extraction_info}")
+    
+    if not coordinates:
+        print("ERROR: No coordinates found in CSV file.")
+        print("Run a simulation first to populate position data.")
+        return 1
+    
+    # If only distance is requested, skip path analysis and report generation
+    if args.just_distance:
+        if 1000 in coordinates and 1001 in coordinates:
+            distance = calculate_distance(coordinates[1000], coordinates[1001])
+            print(f"End node 1000→1001 distance: {distance:.2f} meters")
+            if 'timestamp' in coordinates[1000]:
+                print(f"  (from simulation time {coordinates[1000]['timestamp']:.2f}s)")
+            return 0
+        else:
+            print("Distance not available (missing coordinates)")
+            return 1
+
     # Analyze packet paths
     print("Analyzing packet paths...")
     packet_paths = analyze_packet_paths(df)
