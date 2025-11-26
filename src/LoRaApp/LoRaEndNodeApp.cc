@@ -26,6 +26,9 @@
 #include "LoRaEndNodeApp.h"
 #include "inet/common/FSMA.h"
 #include "../LoRa/LoRaMac.h"
+#include <fstream>
+#include <string>
+#include <vector>
 
 
 #include "inet/mobility/static/StationaryMobility.h"
@@ -455,6 +458,37 @@ void LoRaEndNodeApp::finish() {
         }
         recordScalar("positionX", coord.x);
         recordScalar("positionY", coord.y);
+        
+        // Write end node positions to CSV for easy distance tracking
+        // Use OMNeT++ results directory (same location as .sca files)
+        std::string resultsDir = getEnvir()->getConfig()->getConfigValue(CFGVAR_RESULTDIR);
+        std::string csvPath = resultsDir + "/endnode_positions.csv";
+        
+        std::ofstream csvFile;
+        bool fileExists = false;
+        {
+            std::ifstream testFile(csvPath);
+            fileExists = testFile.good();
+        }
+        
+        csvFile.open(csvPath, std::ios::app);
+        if (csvFile.is_open()) {
+            if (!fileExists) {
+                csvFile << "timestamp,node_id,position_x,position_y,config_name,run_number\n";
+            }
+            
+            csvFile << simTime().dbl() << ","
+                   << getParentModule()->getIndex() + 1000 << ","
+                   << coord.x << ","
+                   << coord.y << ","
+                   << getEnvir()->getConfigEx()->getActiveConfigName() << ","
+                   << getEnvir()->getConfigEx()->getActiveRunNumber()
+                   << "\n";
+            csvFile.close();
+            EV << "Wrote position to: " << csvPath << endl;
+        } else {
+            EV_WARN << "Could not open CSV at: " << csvPath << endl;
+        }
     }
     recordScalar("finalTP", loRaTP);
     recordScalar("finalSF", loRaSF);

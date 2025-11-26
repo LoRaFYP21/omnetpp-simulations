@@ -13,6 +13,7 @@ import os
 import glob
 import math
 import argparse
+import csv
 from datetime import datetime
 from pathlib import Path
 
@@ -251,6 +252,82 @@ def calculate_distance(coord1, coord2):
     dy = coord1['y'] - coord2['y']
     return math.sqrt(dx*dx + dy*dy)
 
+def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report_file, distance):
+    """
+    Append one line summarizing this run to simulation_summary.csv.
+    Always writes to the simulations folder regardless of cwd or report path.
+    """
+    simulations_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_file = os.path.join(simulations_dir, "simulation_summary.csv")
+    
+    # Calculate statistics
+    total_generated = len(df[df['event'] == 'TX_SRC'])
+    total_delivered = len(df[df['event'] == 'DELIVERED'])
+    delivery_rate = (total_delivered / total_generated * 100) if total_generated > 0 else 0.0
+    
+    delivered_packets = [p for p in packet_paths.values() if p['delivered']]
+    transit_times = [p['transit_time'] for p in delivered_packets if p['transit_time'] is not None]
+    
+    avg_transit_time = sum(transit_times) / len(transit_times) if transit_times else None
+    min_transit_time = min(transit_times) if transit_times else None
+    max_transit_time = max(transit_times) if transit_times else None
+    
+    hop_counts = [p['hop_count'] for p in delivered_packets]
+    avg_hop_count = sum(hop_counts) / len(hop_counts) if hop_counts else None
+    
+    throughput = len(transit_times) / max(transit_times) if transit_times and max(transit_times) > 0 else None
+    
+    # Extract coordinates
+    node_1000_x = coordinates.get(1000, {}).get('x', None)
+    node_1000_y = coordinates.get(1000, {}).get('y', None)
+    node_1001_x = coordinates.get(1001, {}).get('x', None)
+    node_1001_y = coordinates.get(1001, {}).get('y', None)
+    
+    # Prepare row
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    row = {
+        'timestamp': timestamp,
+        'results_dir': extraction_info.get('results_dir', ''),
+        'report_file': report_file,
+        'distance_m': f"{distance:.2f}" if distance is not None else '',
+        'endnode_1000_x': f"{node_1000_x:.2f}" if node_1000_x is not None else '',
+        'endnode_1000_y': f"{node_1000_y:.2f}" if node_1000_y is not None else '',
+        'endnode_1001_x': f"{node_1001_x:.2f}" if node_1001_x is not None else '',
+        'endnode_1001_y': f"{node_1001_y:.2f}" if node_1001_y is not None else '',
+        'packets_generated': total_generated,
+        'packets_delivered': total_delivered,
+        'delivery_rate': f"{delivery_rate:.2f}" if delivery_rate is not None else '',
+        'avg_transit_time': f"{avg_transit_time:.3f}" if avg_transit_time is not None else '',
+        'min_transit_time': f"{min_transit_time:.3f}" if min_transit_time is not None else '',
+        'max_transit_time': f"{max_transit_time:.3f}" if max_transit_time is not None else '',
+        'avg_hop_count': f"{avg_hop_count:.2f}" if avg_hop_count is not None else '',
+        'throughput_packets_per_sec': f"{throughput:.2f}" if throughput is not None else ''
+    }
+    
+    # Check if file exists to determine if we need to write header
+    file_exists = os.path.exists(csv_file)
+    
+    try:
+        os.makedirs(os.path.dirname(csv_file), exist_ok=True)
+        with open(csv_file, 'a', newline='', encoding='utf-8') as f:
+            fieldnames = ['timestamp', 'results_dir', 'report_file', 'distance_m', 
+                         'endnode_1000_x', 'endnode_1000_y', 'endnode_1001_x', 'endnode_1001_y',
+                         'packets_generated', 'packets_delivered', 'delivery_rate',
+                         'avg_transit_time', 'min_transit_time', 'max_transit_time',
+                         'avg_hop_count', 'throughput_packets_per_sec']
+            
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            writer.writerow(row)
+            f.flush()
+        
+        print(f"✓ Summary appended to: {csv_file}")
+    except Exception as e:
+        print(f"Warning: Could not append to summary CSV: {e}")
+
 def analyze_packet_paths(df):
     """
     Analyze individual packet paths from source to destination.
@@ -326,10 +403,22 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     # Transit time statistics
     transit_times = [p['transit_time'] for p in delivered_packets if p['transit_time'] is not None]
     
+    # Prepare analysis reports directory inside the simulations folder
+    simulations_dir = os.path.dirname(os.path.abspath(__file__))
+    reports_dir = os.path.join(simulations_dir, "analysis reports")
+    os.makedirs(reports_dir, exist_ok=True)
+
     # Generate output filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"endnode_distance_analysis_{timestamp}.txt"
+        if distance is not None:
+            output_file = f"{distance:.2f}m_{timestamp}.txt"
+        else:
+            output_file = f"no_distance_{timestamp}.txt"
+
+    # If output_file is not an absolute path, place it inside the reports directory
+    if not os.path.isabs(output_file):
+        output_file = os.path.join(reports_dir, output_file)
     
     report_lines = []
     report_lines.append("=" * 80)
@@ -487,8 +576,12 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(report_lines))
-        
+
         print(f"✓ Analysis complete! Report saved to: {output_file}")
+
+        # Append summary to master CSV
+        append_to_summary_csv(coordinates, extraction_info, df, packet_paths, output_file, distance)
+
         return output_file
     except Exception as e:
         print(f"ERROR writing report: {e}")
@@ -536,30 +629,29 @@ def main():
     coordinates, extraction_info = extract_end_node_coordinates(results_dir)
     
     if args.verbose:
-        print(f"CSV extraction: {extraction_info}")
+        print(f"Extraction info: {extraction_info}")
     
     if not coordinates:
         print("ERROR: No coordinates found in CSV file.")
         print("Run a simulation first to populate position data.")
         return 1
     
-    # If only distance is requested, skip path analysis and report generation
+    # If only distance is requested, still print distance but continue to generate report and summary
     if args.just_distance:
         if 1000 in coordinates and 1001 in coordinates:
             distance = calculate_distance(coordinates[1000], coordinates[1001])
             print(f"End node 1000→1001 distance: {distance:.2f} meters")
             if 'timestamp' in coordinates[1000]:
                 print(f"  (from simulation time {coordinates[1000]['timestamp']:.2f}s)")
-            return 0
         else:
             print("Distance not available (missing coordinates)")
-            return 1
+            # Continue so report indicates missing coordinates and appends summary accordingly
 
     # Analyze packet paths
     print("Analyzing packet paths...")
     packet_paths = analyze_packet_paths(df)
     
-    # Generate report
+    # Generate report (also appends a summary CSV inside the function)
     report_file = generate_detailed_report(coordinates, extraction_info, df, packet_paths, args.output)
     
     # Console summary
