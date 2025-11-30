@@ -1035,7 +1035,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         if ( LoRaPacketsToSend.size() > 0 )
             dataPacketsDue = true;
         if ( LoRaPacketsToForward.size() > 0 )
-            forwardPacketsDue = false;
+            forwardPacketsDue = true;  // FIXED: Set to true when packets need forwarding
         // routingPackets due is handled below.
 
         // Calculate next schedule time, first based on routing packets next transmission time,
@@ -1761,8 +1761,15 @@ void LoRaNodeApp::ensurePathLogInitialized() {
 
 // Log each hop (transmission decision) for every data packet
 void LoRaNodeApp::logPathHop(const LoRaAppPacket *packet, const char *eventTag) {
+    EV << "DEBUG: logPathHop called for node " << nodeId << ", event: " << eventTag << ", packet src=" << packet->getSource() << ", dst=" << packet->getDestination() << endl;
+    std::cout << "DEBUG: logPathHop called for node " << nodeId << ", event: " << eventTag << ", packet src=" << packet->getSource() << ", dst=" << packet->getDestination() << std::endl;
+    
     ensurePathLogInitialized();
-    if (!pathLogReady) return;
+    if (!pathLogReady) {
+        EV << "DEBUG: pathLogReady is false, returning" << endl;
+        std::cout << "DEBUG: pathLogReady is false, returning" << std::endl;
+        return;
+    }
     std::ofstream f(pathLogFile, std::ios::out | std::ios::app);
     if (!f.is_open()) return;
     const char *nhType = (packet->getVia() == BROADCAST_ADDRESS) ? "BCAST" : "UNICAST";
@@ -2713,13 +2720,21 @@ simtime_t LoRaNodeApp::sendAckPacket(int destinationNode, int originalDataSeq) {
 void LoRaNodeApp::generateDataPackets() {
     if (failed) return; // Do not generate after failure
 
+    EV << "DEBUG: generateDataPackets() called for node " << nodeId << " (originalIndex=" << originalNodeIndex << ")" << endl;
+    std::cout << "DEBUG: generateDataPackets() called for node " << nodeId << " (originalIndex=" << originalNodeIndex << ")" << std::endl;
+
     if (!onlyNode0SendsPackets || originalNodeIndex == 0) {
+        EV << "DEBUG: Packet generation condition met for node " << nodeId << endl;
+        std::cout << "DEBUG: Packet generation condition met for node " << nodeId << std::endl;
+        
         std::vector<int> destinations = { };
         // If configured, force this node to send only to a specific destination (supports any node ID, including 1000/1001)
         bool forceSingleDestination = par("forceSingleDestination");
         int forcedDestinationId = par("forcedDestinationId");
         if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId != nodeId) {
             destinations.push_back(forcedDestinationId);
+            EV << "DEBUG: Using forced destination " << forcedDestinationId << " for node " << nodeId << endl;
+            std::cout << "DEBUG: Using forced destination " << forcedDestinationId << " for node " << nodeId << std::endl;
         } else {
             if (numberOfDestinationsPerNode == 0 )
                 numberOfDestinationsPerNode = numberOfNodes-1;
@@ -2760,6 +2775,9 @@ void LoRaNodeApp::generateDataPackets() {
                 dataPacket->setByteLength(dataPacketSize);
                 dataPacket->setDepartureTime(simTime());
 
+                EV << "DEBUG: Created packet from " << nodeId << " to " << destinations[j] << " (seq=" << dataPacket->getDataInt() << ")" << endl;
+                std::cout << "DEBUG: Created packet from " << nodeId << " to " << destinations[j] << " (seq=" << dataPacket->getDataInt() << ")" << std::endl;
+
                 switch (routingMetric) {
     //            case 0:
     //                dataPacket->setTtl(1);
@@ -2770,9 +2788,14 @@ void LoRaNodeApp::generateDataPackets() {
                 }
 
                 LoRaPacketsToSend.push_back(*dataPacket);
+                EV << "DEBUG: Added packet to send queue, queue size now: " << LoRaPacketsToSend.size() << endl;
+                std::cout << "DEBUG: Added packet to send queue, queue size now: " << LoRaPacketsToSend.size() << std::endl;
                 delete dataPacket;
             }
         }
+    } else {
+        EV << "DEBUG: Packet generation condition NOT met for node " << nodeId << " (onlyNode0SendsPackets=" << onlyNode0SendsPackets << ", originalIndex=" << originalNodeIndex << ")" << endl;
+        std::cout << "DEBUG: Packet generation condition NOT met for node " << nodeId << " (onlyNode0SendsPackets=" << onlyNode0SendsPackets << ", originalIndex=" << originalNodeIndex << ")" << std::endl;
     }
 }
 
