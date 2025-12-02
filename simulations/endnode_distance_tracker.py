@@ -252,7 +252,7 @@ def calculate_distance(coord1, coord2):
     dy = coord1['y'] - coord2['y']
     return math.sqrt(dx*dx + dy*dy)
 
-def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report_file, distance):
+def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report_file, distance, routing_method):
     """
     Append one line summarizing this run to simulation_summary.csv.
     Always writes to the simulations folder regardless of cwd or report path.
@@ -287,6 +287,7 @@ def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     row = {
         'timestamp': timestamp,
+        'routing_method': routing_method,
         'results_dir': extraction_info.get('results_dir', ''),
         'report_file': report_file,
         'distance_m': f"{distance:.2f}" if distance is not None else '',
@@ -310,7 +311,7 @@ def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report
     try:
         os.makedirs(os.path.dirname(csv_file), exist_ok=True)
         with open(csv_file, 'a', newline='', encoding='utf-8') as f:
-            fieldnames = ['timestamp', 'results_dir', 'report_file', 'distance_m', 
+            fieldnames = ['timestamp', 'routing_method', 'results_dir', 'report_file', 'distance_m', 
                          'endnode_1000_x', 'endnode_1000_y', 'endnode_1001_x', 'endnode_1001_y',
                          'packets_generated', 'packets_delivered', 'delivery_rate',
                          'avg_transit_time', 'min_transit_time', 'max_transit_time',
@@ -327,6 +328,40 @@ def append_to_summary_csv(coordinates, extraction_info, df, packet_paths, report
         print(f"✓ Summary appended to: {csv_file}")
     except Exception as e:
         print(f"Warning: Could not append to summary CSV: {e}")
+
+def detect_routing_method(df):
+    """
+    Detect the routing method used based on path events.
+    Returns 'flooding', 'routing', or 'mixed' based on analysis of the data.
+    """
+    if df.empty:
+        return 'unknown'
+    
+    # Count different types of transmission events
+    tx_src_events = len(df[df['event'] == 'TX_SRC'])
+    enqueue_fwd_events = len(df[df['event'] == 'ENQUEUE_FWD'])
+    tx_fwd_events = len(df[df['event'].isin(['TX_FWD_DATA', 'TX_FWD_ACK'])])
+    
+    # Check if we have broadcast addresses (16777215 = BROADCAST_ADDRESS)
+    broadcast_events = len(df[df['chosenVia'] == 16777215])
+    unicast_events = len(df[(df['chosenVia'] != 16777215) & (df['chosenVia'].notna())])
+    
+    # Analyze routing table lookups vs broadcast behavior
+    if broadcast_events > 0 and unicast_events == 0:
+        # All transmissions are broadcast - likely flooding
+        if enqueue_fwd_events > tx_fwd_events * 2:
+            return 'flooding'  # Many nodes enqueueing suggests flooding behavior
+        else:
+            return 'broadcast'
+    elif unicast_events > broadcast_events:
+        # More unicast than broadcast - likely routing table based
+        return 'routing'
+    elif broadcast_events > 0 and unicast_events > 0:
+        # Mix of both - hybrid approach
+        return 'mixed'
+    else:
+        # Unable to determine
+        return 'unknown'
 
 def analyze_packet_paths(df):
     """
@@ -395,6 +430,9 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     if 1000 in coordinates and 1001 in coordinates:
         distance = calculate_distance(coordinates[1000], coordinates[1001])
     
+    # Detect routing method
+    routing_method = detect_routing_method(df)
+    
     # Count packet statistics
     total_generated = len(df[df['event'] == 'TX_SRC'])
     total_delivered = len(df[df['event'] == 'DELIVERED'])
@@ -412,9 +450,9 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     if output_file is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if distance is not None:
-            output_file = f"{distance:.2f}m_{timestamp}.txt"
+            output_file = f"{routing_method}_{distance:.2f}m_{timestamp}.txt"
         else:
-            output_file = f"no_distance_{timestamp}.txt"
+            output_file = f"{routing_method}_no_distance_{timestamp}.txt"
 
     # If output_file is not an absolute path, place it inside the reports directory
     if not os.path.isabs(output_file):
@@ -431,12 +469,34 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     # SECTION 1: COORDINATE EXTRACTION STATUS
     report_lines.append("1. COORDINATE EXTRACTION STATUS")
     report_lines.append("-" * 50)
+    report_lines.append(f"Routing method detected: {routing_method.upper()}")
     report_lines.append(f"Results directory: {extraction_info.get('results_dir', 'Not found')}")
     if extraction_info.get('source_file'):
         report_lines.append(f"Most recent scalar file: {extraction_info.get('source_file')}")
     report_lines.append(f"Files scanned: {extraction_info['files_scanned']}")
     report_lines.append(f"Scalar entries found: {extraction_info['scalars_found']}")
     report_lines.append(f"Coordinates extracted: {extraction_info['coordinates_extracted']}")
+    
+    # Add routing method explanation
+    report_lines.append("")
+    report_lines.append("ROUTING METHOD ANALYSIS:")
+    if routing_method == 'flooding':
+        report_lines.append("  Detected FLOODING: All transmissions use broadcast addresses")
+        report_lines.append("  - Packets are forwarded by all receiving nodes")
+        report_lines.append("  - No routing table lookups required")
+        report_lines.append("  - High redundancy, good for reliability")
+    elif routing_method == 'routing':
+        report_lines.append("  Detected ROUTING: Uses unicast next-hop addressing")
+        report_lines.append("  - Packets follow calculated routes via routing tables")
+        report_lines.append("  - Efficient bandwidth usage")
+        report_lines.append("  - Lower redundancy than flooding")
+    elif routing_method == 'mixed':
+        report_lines.append("  Detected MIXED: Combination of flooding and routing")
+        report_lines.append("  - Some packets broadcast, others use routing tables")
+        report_lines.append("  - Hybrid approach balancing efficiency and reliability")
+    else:
+        report_lines.append("  UNKNOWN: Unable to determine routing method from data")
+        report_lines.append("  - May indicate insufficient path data or unusual configuration")
     
     # Check if coordinates vary across runs
     if 'coordinate_variation' in extraction_info and not extraction_info['coordinate_variation']:
@@ -580,7 +640,7 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
         print(f"✓ Analysis complete! Report saved to: {output_file}")
 
         # Append summary to master CSV
-        append_to_summary_csv(coordinates, extraction_info, df, packet_paths, output_file, distance)
+        append_to_summary_csv(coordinates, extraction_info, df, packet_paths, output_file, distance, routing_method)
 
         return output_file
     except Exception as e:
