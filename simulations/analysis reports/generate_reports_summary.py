@@ -72,19 +72,14 @@ def parse_report_file(path):
     data['total_generated'] = find_first(r"Total data packets generated:\s*(\d+)")
     data['total_delivered'] = find_first(r"Total data packets delivered:\s*(\d+)")
 
-    # delivery rate
-    dr = find_first(r"Delivery success rate:\s*([\d.]+)%")
-    if not dr:
-        # fallback: look for line like "Delivery success rate: 12.3% (2/10)"
-        dr = find_first(r"Delivery success rate:\s*([\d.]+)%")
-    data['delivery_rate_pct'] = dr
+    # Delivery rate is intentionally not exported in the summary CSV
 
-    # transit times
-    data['avg_transit_time_s'] = find_first(r"Average transit time:\s*([\d.]+)\s*seconds")
-    data['min_transit_time_s'] = find_first(r"Minimum transit time:\s*([\d.]+)\s*seconds")
-    if not data['min_transit_time_s']:
-        data['min_transit_time_s'] = find_first(r"Minimum transit time:\s*([\d.]+)\s*seconds")
-    data['max_transit_time_s'] = find_first(r"Maximum transit time:\s*([\d.]+)\s*seconds")
+    # final transit time (first-arrival) — parse "Final transit time:" (may end with 's' or ' seconds')
+    final_tt = find_first(r"Final transit time:\s*([\d.]+)(?:s|\s*seconds)?")
+    if not final_tt:
+        # fallback: use the first numeric in the "Transit times (all copies):" list
+        final_tt = find_first(r"Transit times \(all copies\):\s*([\d.]+)")
+    data['transit_time_s'] = final_tt
 
     # throughput (packets/second)
     th = find_first(r"throughput:\s*([\d.]+)\s*packets/?second", re.IGNORECASE)
@@ -92,37 +87,22 @@ def parse_report_file(path):
         th = find_first(r"Effective throughput:\s*([\d.]+)\s*packets/?second", re.IGNORECASE)
     data['throughput_packets_per_s'] = th
 
-    # Hop counts per delivered packet: parse per-packet section
-    hop_counts = []
-    current_packet = None
-    current_delivered = False
+    # Final hop count: parse "Final hop count:" from report
+    final_hop = find_first(r"Final hop count:\s*(\d+)")
+    # Save as single value in hop_counts column (keeping column name same)
+    data['hop_counts'] = final_hop or ''
 
-    for i, line in enumerate(lines):
-        line = line.strip()
-        # Packet start
-        m = re.match(r"Packet\s+(\S+):", line)
-        if m:
-            current_packet = m.group(1)
-            current_delivered = False
-            continue
-        if current_packet is None:
-            continue
-        # Delivered marker
-        if 'Delivered at' in line or '✓ Delivered' in line:
-            current_delivered = True
-            continue
-        # Hop count line
-        m = re.match(r"Hop count:\s*(\d+)", line)
-        if m:
-            hop = int(m.group(1))
-            if current_delivered:
-                hop_counts.append(hop)
-            # reset packet context after reading hop count to avoid duplicate association
-            current_packet = None
-            current_delivered = False
-
-    # Save hop counts as semicolon-separated string (or empty)
-    data['hop_counts'] = ';'.join(str(x) for x in hop_counts) if hop_counts else ''
+    # Unique nodes processed: parse either per-packet lines and take max, or a summary if present
+    # We look for lines like: "Unique nodes processed: N"
+    # We'll take the maximum N found across packets as the summary value
+    nodes_processed_matches = re.findall(r"Unique nodes processed:\s*(\d+)", text)
+    if nodes_processed_matches:
+        try:
+            data['nodes_processed'] = str(max(int(n) for n in nodes_processed_matches))
+        except Exception:
+            data['nodes_processed'] = ''
+    else:
+        data['nodes_processed'] = ''
 
     # Flag indicating whether at least one copy was delivered
     try:
@@ -154,10 +134,10 @@ def main():
     fieldnames = [
         'report_file', 'results_dir',
         'endnode_1000_x','endnode_1000_y','endnode_1001_x','endnode_1001_y',
-        'distance_m','total_generated','total_delivered','delivery_rate_pct',
+        'distance_m','total_generated','total_delivered',
         'delivered_any',
-        'avg_transit_time_s','min_transit_time_s','max_transit_time_s',
-        'hop_counts','throughput_packets_per_s'
+        'transit_time_s',
+        'hop_counts','throughput_packets_per_s','nodes_processed'
     ]
 
     rows = []
