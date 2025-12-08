@@ -16,6 +16,7 @@ import argparse
 import csv
 from datetime import datetime
 from pathlib import Path
+import re
 
 def find_latest_results_directory(base_dir="./"):
     """
@@ -596,6 +597,69 @@ def generate_detailed_report(coordinates, extraction_info, df, packet_paths, out
     
     report_lines.append("")
     
+    # SECTION 2a: NETWORK ENERGY SUMMARY (aggregated from .sca scalars)
+    # We sum per-node scalars if available: energyTx, energyRx, energyReceiverBusy, energyIdle, totalEnergyConsumed
+    # If per-mode scalars are missing, we still report totalEnergyConsumed.
+    def _aggregate_energy_scalars_from_latest_sca(results_dir):
+        energy_totals = {
+            'energyTx': 0.0,
+            'energyRx': 0.0,
+            'energyReceiverBusy': 0.0,
+            'energyIdle': 0.0,
+            'totalEnergyConsumed': 0.0,
+        }
+        found_any = False
+        try:
+            sca_files = glob.glob(os.path.join(results_dir or '.', "*.sca"))
+            sca_files.sort(key=os.path.getmtime, reverse=True)
+            if not sca_files:
+                return energy_totals, found_any
+            latest = sca_files[0]
+            # Patterns:
+            # scalar <module_path> <name> <value>
+            line_pat = re.compile(r"^\s*scalar\s+(\S+)\s+(\S+)\s+([0-9eE+\-\.]+)\s*$")
+            with open(latest, 'r', encoding='utf-8') as f:
+                for line in f:
+                    m = line_pat.match(line)
+                    if not m:
+                        continue
+                    name = m.group(2)
+                    val = float(m.group(3))
+                    if name in energy_totals:
+                        energy_totals[name] += val
+                        found_any = True
+        except Exception:
+            pass
+        return energy_totals, found_any
+
+    energy_totals, energy_found = _aggregate_energy_scalars_from_latest_sca(extraction_info.get('results_dir'))
+
+    report_lines.append("NETWORK ENERGY SUMMARY")
+    report_lines.append("-" * 50)
+    if energy_found or energy_totals.get('totalEnergyConsumed', 0.0) > 0.0:
+        # Always report total; per-mode only if non-zero or present
+        tx = energy_totals.get('energyTx')
+        rx = energy_totals.get('energyRx')
+        busy = energy_totals.get('energyReceiverBusy')
+        idle = energy_totals.get('energyIdle')
+        total = energy_totals.get('totalEnergyConsumed')
+
+        # Per-state if available (non-zero)
+        if tx:
+            report_lines.append(f"  Total transmission energy consumed by network: {tx:.6f} J")
+        if rx:
+            report_lines.append(f"  Total receiving energy consumed by network: {rx:.6f} J")
+        if busy:
+            report_lines.append(f"  Total receiver-busy energy consumed by network: {busy:.6f} J")
+        if idle:
+            report_lines.append(f"  Total idle energy consumed by network: {idle:.6f} J")
+        report_lines.append(f"  Total energy consumed by network: {total:.6f} J")
+    else:
+        report_lines.append("  No energy scalars found in the latest .sca file.")
+        report_lines.append("  Tip: modify LoRaEnergyConsumer to record per-mode scalars (energyTx, energyRx, energyReceiverBusy, energyIdle)")
+
+    report_lines.append("")
+
     # SECTION 2: PACKET GENERATION AND DELIVERY
     report_lines.append("2. PACKET GENERATION AND DELIVERY STATISTICS")
     report_lines.append("-" * 50)
