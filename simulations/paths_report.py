@@ -1,92 +1,161 @@
-import csv
 import argparse
+import csv
 import math
+import os
 from collections import defaultdict, namedtuple
-from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
-Row = namedtuple('Row', ['simTime','event','packetSeq','src','dst','currentNode','ttlAfterDecr','chosenVia','nextHopType'])
+Row = namedtuple(
+    'Row',
+    [
+        'simTime',
+        'event',
+        'packetSeq',
+        'src',
+        'dst',
+        'currentNode',
+        'ttlAfterDecr',
+        'chosenVia',
+        'nextHopType',
+    ],
+)
+
 
 def read_paths_csv(path: str) -> List[Row]:
     rows: List[Row] = []
-    with open(path, newline='') as f:
-        r = csv.DictReader(f)
-        for d in r:
-            rows.append(Row(
-                simTime=float(d['simTime']),
-                event=d['event'],
-                packetSeq=int(d['packetSeq']),
-                src=int(d['src']),
-                dst=int(d['dst']),
-                currentNode=int(d['currentNode']),
-                ttlAfterDecr=int(d['ttlAfterDecr']),
-                chosenVia=int(d['chosenVia']),
-                nextHopType=d['nextHopType'],
-            ))
+    with open(path, newline='') as fh:
+        reader = csv.DictReader(fh)
+        for entry in reader:
+            rows.append(
+                Row(
+                    simTime=float(entry['simTime']),
+                    event=entry['event'],
+                    packetSeq=int(entry['packetSeq']),
+                    src=int(entry['src']),
+                    dst=int(entry['dst']),
+                    currentNode=int(entry['currentNode']),
+                    ttlAfterDecr=int(entry['ttlAfterDecr']),
+                    chosenVia=int(entry['chosenVia']),
+                    nextHopType=entry['nextHopType'],
+                )
+            )
     return rows
 
+
 class Positions:
-    def __init__(self):
-        self.pos: Dict[int, Tuple[float,float]] = {}
-    def load_csv(self, path: str):
-        with open(path, newline='') as f:
-            r = csv.DictReader(f)
-            # expect columns: id,x,y (meters)
-            for d in r:
-                nid = int(d['id'])
-                x = float(d['x'])
-                y = float(d['y'])
-                self.pos[nid] = (x,y)
-    def get(self, nid: int) -> Optional[Tuple[float,float]]:
-        return self.pos.get(nid)
+    """Container for end node coordinates."""
 
-def euclidean_distance(p1: Tuple[float,float], p2: Tuple[float,float]) -> float:
-    dx = p1[0]-p2[0]
-    dy = p1[1]-p2[1]
-    return math.hypot(dx, dy)
+    def __init__(self) -> None:
+        self._positions: Dict[int, Tuple[Optional[float], Optional[float]]] = {}
 
-def compute_report(rows: List[Row], positions: Optional[Positions]=None) -> List[Dict]:
-    # Group rows by (src,dst,packetSeq)
-    by_triplet: Dict[Tuple[int,int,int], List[Row]] = defaultdict(list)
+    def load_csv(self, path: str) -> None:
+        with open(path, newline='') as fh:
+            reader = csv.DictReader(fh)
+            for entry in reader:
+                node_id = int(entry['id'])
+                x = float(entry['x'])
+                y = float(entry['y'])
+                self._positions[node_id] = (x, y)
+
+    def load_from_scalars(self, files: Iterable[Path]) -> None:
+        for sca_path in files:
+            try:
+                with open(sca_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                    for line in fh:
+                        if not line.startswith('scalar '):
+                            continue
+                        parts = line.strip().split()
+                        if len(parts) < 4:
+                            continue
+                        module_path = parts[1]
+                        scalar_name = parts[2]
+                        value = parts[3]
+                        if scalar_name not in {'CordiX', 'CordiY', 'positionX', 'positionY'}:
+                            continue
+                        if 'loRaEndNodes[' not in module_path:
+                            continue
+                        try:
+                            start = module_path.index('loRaEndNodes[') + len('loRaEndNodes[')
+                            end = module_path.index(']', start)
+                            node_index = int(module_path[start:end])
+                        except (ValueError, IndexError):
+                            continue
+                        node_id = 1000 + node_index
+                        try:
+                            coord_value = float(value)
+                        except ValueError:
+                            continue
+                        x, y = self._positions.get(node_id, (None, None))
+                        if scalar_name in {'CordiX', 'positionX'}:
+                            x = coord_value
+                        else:
+                            y = coord_value
+                        self._positions[node_id] = (x, y)
+            except OSError:
+                continue
+
+    def get(self, node_id: int) -> Optional[Tuple[float, float]]:
+        coords = self._positions.get(node_id)
+        if not coords:
+            return None
+        if coords[0] is None or coords[1] is None:
+            return None
+        return coords
+
+
+def euclidean_distance(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def compute_report(
+    rows: List[Row],
+    positions: Optional[Positions] = None,
+    run_index: Optional[int] = None,
+) -> List[Dict[str, Optional[float]]]:
+    by_triplet: Dict[Tuple[int, int, int], List[Row]] = defaultdict(list)
     for row in rows:
-        by_triplet[(row.src,row.dst,row.packetSeq)].append(row)
-    # Sort each list by time
-    for k in by_triplet:
-        by_triplet[k].sort(key=lambda r: r.simTime)
+        by_triplet[(row.src, row.dst, row.packetSeq)].append(row)
 
-    # Identify end-node pairs present (src>=1000 and dst>=1000)
-    pairs = sorted({(src,dst) for (src,dst,seq) in by_triplet.keys() if src>=1000 and dst>=1000})
+    for key in by_triplet:
+        by_triplet[key].sort(key=lambda r: r.simTime)
 
-    report: List[Dict] = []
-    for (src,dst) in pairs:
-        # find earliest TX_SRC for this (src,dst)
-        tx_rows = [r for (s,d,seq), lst in by_triplet.items() if s==src and d==dst for r in lst if r.event=='TX_SRC']
-        if not tx_rows:
+    pairs = sorted({(src, dst) for (src, dst, _seq) in by_triplet.keys() if src >= 1000 and dst >= 1000})
+
+    report_rows: List[Dict[str, Optional[float]]] = []
+    for (src, dst) in pairs:
+        tx_events = [
+            r
+            for (s, d, _seq), lst in by_triplet.items()
+            if s == src and d == dst
+            for r in lst
+            if r.event == 'TX_SRC'
+        ]
+        if not tx_events:
             continue
-        first_tx = min(tx_rows, key=lambda r: r.simTime)
-        # match the packetSeq of the first TX to track its first delivery path
-        seq = first_tx.packetSeq
-        seq_rows = by_triplet.get((src,dst,seq), [])
-        first_delivered = None
-        for r in seq_rows:
-            if r.event == 'DELIVERED' and r.currentNode == dst:
-                first_delivered = r
-                break
-        # transit time
+        first_tx = min(tx_events, key=lambda r: r.simTime)
+        seq_rows = by_triplet.get((src, dst, first_tx.packetSeq), [])
+        first_delivered = next(
+            (r for r in seq_rows if r.event == 'DELIVERED' and r.currentNode == dst),
+            None,
+        )
+
         transit_time = None
         hop_count = None
         copies_received = 0
         if first_delivered:
             transit_time = first_delivered.simTime - first_tx.simTime
-            # derive hop count from TTL: hops = (ttl at TX_SRC after decrement?) - (ttl at delivery)
-            # We assume TX_SRC ttlAfterDecr reflects initial TTL after source decrement.
             hop_count = first_tx.ttlAfterDecr - first_delivered.ttlAfterDecr
-            # count total deliveries at destination for this packetSeq (including duplicates)
-            copies_received = sum(1 for r in seq_rows if r.event=='DELIVERED' and r.currentNode==dst)
+            copies_received = sum(1 for r in seq_rows if r.event == 'DELIVERED' and r.currentNode == dst)
         else:
-            # still count any deliveries for other seqs to give total copies later
-            copies_received = sum(1 for (s,d,seq2), lst in by_triplet.items() if s==src and d==dst for rr in lst if rr.event=='DELIVERED' and rr.currentNode==dst)
+            copies_received = sum(
+                1
+                for (s, d, _seq), lst in by_triplet.items()
+                if s == src and d == dst
+                for r in lst
+                if r.event == 'DELIVERED' and r.currentNode == dst
+            )
 
-        # distance if available
         distance_m = None
         if positions is not None:
             p_src = positions.get(src)
@@ -94,45 +163,110 @@ def compute_report(rows: List[Row], positions: Optional[Positions]=None) -> List
             if p_src and p_dst:
                 distance_m = euclidean_distance(p_src, p_dst)
 
-        report.append({
-            'src': src,
-            'dst': dst,
-            'first_tx_time_s': round(first_tx.simTime, 6),
-            'first_delivery_time_s': round(first_delivered.simTime, 6) if first_delivered else None,
-            'transit_time_s': round(transit_time, 6) if transit_time is not None else None,
-            'first_packet_hop_count': hop_count,
-            'copies_received_at_dst_for_first_packet': copies_received,
-            'distance_m': round(distance_m, 2) if distance_m is not None else None,
-        })
-    return report
+        report_rows.append(
+            {
+                'run_index': run_index,
+                'src': src,
+                'dst': dst,
+                'distance_m': round(distance_m, 2) if distance_m is not None else None,
+                'delivered': 1 if copies_received > 0 else 0,
+                'transit_time_s': round(transit_time, 6) if transit_time is not None else None,
+                'first_packet_hop_count': hop_count,
+                'copies_received_at_dst_for_first_packet': copies_received,
+                'first_tx_time_s': round(first_tx.simTime, 6),
+                'first_delivery_time_s': round(first_delivered.simTime, 6) if first_delivered else None,
+            }
+        )
 
-def main():
-    ap = argparse.ArgumentParser(description='Generate pair-wise report from paths.csv')
-    ap.add_argument('--paths', default='delivered_packets/paths.csv', help='Path to paths.csv')
-    ap.add_argument('--positions', default=None, help='Optional CSV with end-node positions: columns id,x,y (meters)')
-    ap.add_argument('--output', default='pair_report.csv', help='Output CSV file')
-    args = ap.parse_args()
+    return report_rows
+
+
+def write_rows(path: str, rows_to_write: List[Dict[str, Optional[float]]], append: bool) -> None:
+    if not path:
+        return
+    out_dir = os.path.dirname(path) or '.'
+    os.makedirs(out_dir, exist_ok=True)
+    file_exists = os.path.exists(path)
+    mode = 'a' if append and file_exists else 'w'
+    fieldnames = [
+        'run_index',
+        'src',
+        'dst',
+        'distance_m',
+        'delivered',
+        'transit_time_s',
+        'first_packet_hop_count',
+        'copies_received_at_dst_for_first_packet',
+        'first_tx_time_s',
+        'first_delivery_time_s',
+    ]
+    try:
+        with open(path, mode, newline='') as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            if mode == 'w' or not file_exists:
+                writer.writeheader()
+            for row in rows_to_write:
+                writer.writerow(row)
+    except PermissionError:
+        # Fallback: write to a new file to avoid lock/permission issues
+        base, ext = os.path.splitext(os.path.basename(path))
+        fallback = os.path.join(out_dir, f"{base}_fallback{ext or '.csv'}")
+        with open(fallback, 'a' if append else 'w', newline='') as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            if not os.path.exists(fallback) or not append:
+                writer.writeheader()
+            for row in rows_to_write:
+                writer.writerow(row)
+        print(f"Permission denied for '{path}', wrote to '{fallback}' instead.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Generate per-run pair metrics from paths.csv')
+    parser.add_argument('--paths', default='delivered_packets/paths.csv', help='Path to the paths.csv file')
+    parser.add_argument('--positions', default=None, help='Optional CSV containing columns id,x,y (meters)')
+    parser.add_argument('--output', default='pair_report.csv', help='Aggregate CSV path (appended)')
+    parser.add_argument('--sca-dir', default=None, help='Directory containing .sca files for this run')
+    parser.add_argument('--run-index', type=int, default=None, help='Run index to record alongside metrics')
+    parser.add_argument('--per-run-output', default=None, help='Optional CSV written for this run only (overwritten)')
+    args = parser.parse_args()
 
     rows = read_paths_csv(args.paths)
-    positions = None
+
+    positions: Optional[Positions] = None
     if args.positions:
         positions = Positions()
         positions.load_csv(args.positions)
+    else:
+        # Try to locate scalars automatically when --sca-dir isn't provided
+        candidate_dirs: List[Path] = []
+        if args.sca_dir:
+            candidate_dirs.append(Path(args.sca_dir))
+        # common defaults relative to CWD
+        candidate_dirs.extend([
+            Path('results'),
+            Path('.') / 'results',
+            Path('..') / 'results',
+        ])
+        for sca_dir in candidate_dirs:
+            if sca_dir.exists():
+                files = sorted(sca_dir.glob('*.sca'))
+                if files:
+                    positions = Positions()
+                    positions.load_from_scalars(files)
+                    break
 
-    report = compute_report(rows, positions)
+    report_rows = compute_report(rows, positions, run_index=args.run_index)
 
-    # Write CSV
-    fieldnames = ['src','dst','distance_m','first_tx_time_s','first_delivery_time_s','transit_time_s','first_packet_hop_count','copies_received_at_dst_for_first_packet']
-    with open(args.output, 'w', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for row in report:
-            w.writerow(row)
+    write_rows(args.output, report_rows, append=True)
+    if args.per_run_output:
+        write_rows(args.per_run_output, report_rows, append=False)
 
-    # Also print a quick summary
-    print(f'Wrote {len(report)} rows to {args.output}')
-    for r in report:
-        print(f"{r['src']}->{r['dst']}: transit={r['transit_time_s']}s, hops={r['first_packet_hop_count']}, copies={r['copies_received_at_dst_for_first_packet']}, dist={r['distance_m']}")
+    print(f"Wrote {len(report_rows)} rows to {args.output}")
+    for row in report_rows:
+        print(
+            f"{row['src']}->{row['dst']}: transit={row['transit_time_s']}s, hops={row['first_packet_hop_count']}, copies={row['copies_received_at_dst_for_first_packet']}, dist={row['distance_m']}"
+        )
+
 
 if __name__ == '__main__':
     main()
