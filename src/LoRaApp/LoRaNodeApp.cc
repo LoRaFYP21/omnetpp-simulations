@@ -489,15 +489,11 @@ void LoRaNodeApp::initialize(int stage) {
         singleMetricRoutingTable = {};
         dualMetricRoutingTable = {};
 
-    // Prepare routing CSV path (per-node file)
-    openRoutingCsv();
-
-    // Prepare delivered CSV path (per-node file)
-    openDeliveredCsv();
+    // Note: prepare CSV paths after nodeId is known (set further down)
 
 
         //Node identifier (re-assign and apply end-node offset when participating in routing)
-        nodeId = getContainingNode(this)->getIndex();
+            nodeId = getContainingNode(this)->getIndex();
         {
             cModule *hostMod = getContainingNode(this);
             bool isEnd = false;
@@ -514,6 +510,12 @@ void LoRaNodeApp::initialize(int stage) {
                 nodeId += 1000;
             }
         }
+
+    // Prepare routing CSV path (per-node file) now that nodeId is set
+    openRoutingCsv();
+
+    // Prepare delivered CSV path (per-node file)
+    openDeliveredCsv();
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
