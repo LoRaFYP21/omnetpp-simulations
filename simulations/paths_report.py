@@ -251,8 +251,14 @@ def main() -> None:
             if sca_dir.exists():
                 files = sorted(sca_dir.glob('*.sca'))
                 if files:
+                    # Prefer the most recent .sca file to reflect current run
+                    try:
+                        latest_file = max(files, key=lambda p: p.stat().st_mtime)
+                        files_to_load = [latest_file]
+                    except Exception:
+                        files_to_load = files
                     positions = Positions()
-                    positions.load_from_scalars(files)
+                    positions.load_from_scalars(files_to_load)
                     break
 
     report_rows = compute_report(rows, positions, run_index=args.run_index)
