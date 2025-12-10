@@ -104,6 +104,49 @@ class Positions:
         return coords
 
 
+class EnergyTotals:
+    """Parse total energy consumed from .sca files.
+
+    Sums scalars that commonly represent energy consumption across nodes.
+    Tries multiple scalar names to be robust across configurations.
+    """
+
+    ENERGY_KEYS = {
+        'energyConsumed',
+        'energyConsumedJ',
+        'totalEnergyConsumed',
+        'totalEnergyConsumedJ',
+        'consumedEnergy',
+    }
+
+    def __init__(self) -> None:
+        self.total_joules: float = 0.0
+
+    def load_from_scalars(self, files: Iterable[Path]) -> None:
+        total = 0.0
+        for sca_path in files:
+            try:
+                with open(sca_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                    for line in fh:
+                        if not line.startswith('scalar '):
+                            continue
+                        parts = line.strip().split()
+                        if len(parts) < 4:
+                            continue
+                        scalar_name = parts[2]
+                        value = parts[3]
+                        if scalar_name not in self.ENERGY_KEYS:
+                            continue
+                        try:
+                            v = float(value)
+                        except ValueError:
+                            continue
+                        total += v
+            except OSError:
+                continue
+        self.total_joules = total
+
+
 def euclidean_distance(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
@@ -112,6 +155,7 @@ def compute_report(
     rows: List[Row],
     positions: Optional[Positions] = None,
     run_index: Optional[int] = None,
+    total_energy_j: Optional[float] = None,
 ) -> List[Dict[str, Optional[float]]]:
     by_triplet: Dict[Tuple[int, int, int], List[Row]] = defaultdict(list)
     for row in rows:
@@ -169,6 +213,7 @@ def compute_report(
                 'src': src,
                 'dst': dst,
                 'distance_m': round(distance_m, 2) if distance_m is not None else None,
+                'total_energy_j': round(total_energy_j, 6) if total_energy_j is not None else None,
                 'delivered': 1 if copies_received > 0 else 0,
                 'transit_time_s': round(transit_time, 6) if transit_time is not None else None,
                 'first_packet_hop_count': hop_count,
@@ -193,6 +238,7 @@ def write_rows(path: str, rows_to_write: List[Dict[str, Optional[float]]], appen
         'src',
         'dst',
         'distance_m',
+        'total_energy_j',
         'delivered',
         'transit_time_s',
         'first_packet_hop_count',
@@ -247,6 +293,8 @@ def main() -> None:
             Path('.') / 'results',
             Path('..') / 'results',
         ])
+        energy_totals: Optional[EnergyTotals] = None
+        latest_sca_files: List[Path] = []
         for sca_dir in candidate_dirs:
             if sca_dir.exists():
                 files = sorted(sca_dir.glob('*.sca'))
@@ -255,13 +303,26 @@ def main() -> None:
                     try:
                         latest_file = max(files, key=lambda p: p.stat().st_mtime)
                         files_to_load = [latest_file]
+                        latest_sca_files = files_to_load
                     except Exception:
                         files_to_load = files
+                        latest_sca_files = files
                     positions = Positions()
                     positions.load_from_scalars(files_to_load)
+                    energy_totals = EnergyTotals()
+                    energy_totals.load_from_scalars(latest_sca_files)
                     break
 
-    report_rows = compute_report(rows, positions, run_index=args.run_index)
+    # Compute report, including total energy if parsed
+    total_energy_j: Optional[float] = None
+    try:
+        # energy_totals is defined only in the auto-detect branch above
+        if 'energy_totals' in locals() and energy_totals is not None:
+            total_energy_j = energy_totals.total_joules
+    except Exception:
+        total_energy_j = None
+
+    report_rows = compute_report(rows, positions, run_index=args.run_index, total_energy_j=total_energy_j)
 
     write_rows(args.output, report_rows, append=True)
     if args.per_run_output:
@@ -270,7 +331,7 @@ def main() -> None:
     print(f"Wrote {len(report_rows)} rows to {args.output}")
     for row in report_rows:
         print(
-            f"{row['src']}->{row['dst']}: transit={row['transit_time_s']}s, hops={row['first_packet_hop_count']}, copies={row['copies_received_at_dst_for_first_packet']}, dist={row['distance_m']}"
+            f"{row['src']}->{row['dst']}: transit={row['transit_time_s']}s, hops={row['first_packet_hop_count']}, copies={row['copies_received_at_dst_for_first_packet']}, dist={row['distance_m']}, energyJ={row['total_energy_j']}"
         )
 
 
