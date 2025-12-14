@@ -112,11 +112,9 @@ class EnergyTotals:
     """
 
     ENERGY_KEYS = {
-        'energyConsumed',
+        #'energyConsumed',
         'energyConsumedJ',
         'totalEnergyConsumed',
-        'totalEnergyConsumedJ',
-        'consumedEnergy',
     }
 
     def __init__(self) -> None:
@@ -187,6 +185,7 @@ def compute_report(
         transit_time = None
         hop_count = None
         copies_received = 0
+        unique_nodes_processed = None
         if first_delivered:
             transit_time = first_delivered.simTime - first_tx.simTime
             hop_count = first_tx.ttlAfterDecr - first_delivered.ttlAfterDecr
@@ -199,6 +198,16 @@ def compute_report(
                 for r in lst
                 if r.event == 'DELIVERED' and r.currentNode == dst
             )
+
+        # Count unique nodes that processed this pair across all packets (any event rows for this src,dst)
+        pair_rows_all: List[Row] = [
+            r
+            for (s, d, _seq), lst in by_triplet.items()
+            if s == src and d == dst
+            for r in lst
+        ]
+        if pair_rows_all:
+            unique_nodes_processed = len({r.currentNode for r in pair_rows_all})
 
         distance_m = None
         if positions is not None:
@@ -218,6 +227,7 @@ def compute_report(
                 'transit_time_s': round(transit_time, 6) if transit_time is not None else None,
                 'first_packet_hop_count': hop_count,
                 'copies_received_at_dst_for_first_packet': copies_received,
+                'unique_nodes_processed_first_packet': unique_nodes_processed,
                 'first_tx_time_s': round(first_tx.simTime, 6),
                 'first_delivery_time_s': round(first_delivered.simTime, 6) if first_delivered else None,
             }
@@ -243,6 +253,7 @@ def write_rows(path: str, rows_to_write: List[Dict[str, Optional[float]]], appen
         'transit_time_s',
         'first_packet_hop_count',
         'copies_received_at_dst_for_first_packet',
+        'unique_nodes_processed_first_packet',
         'first_tx_time_s',
         'first_delivery_time_s',
     ]
@@ -294,24 +305,25 @@ def main() -> None:
             Path('..') / 'results',
         ])
         energy_totals: Optional[EnergyTotals] = None
-        latest_sca_files: List[Path] = []
+        latest_sca_file: Optional[Path] = None
+        all_sca_files: List[Path] = []
         for sca_dir in candidate_dirs:
             if sca_dir.exists():
-                files = sorted(sca_dir.glob('*.sca'))
-                if files:
-                    # Prefer the most recent .sca file to reflect current run
-                    try:
-                        latest_file = max(files, key=lambda p: p.stat().st_mtime)
-                        files_to_load = [latest_file]
-                        latest_sca_files = files_to_load
-                    except Exception:
-                        files_to_load = files
-                        latest_sca_files = files
-                    positions = Positions()
-                    positions.load_from_scalars(files_to_load)
-                    energy_totals = EnergyTotals()
-                    energy_totals.load_from_scalars(latest_sca_files)
-                    break
+                try:
+                    all_sca_files.extend(list(sca_dir.glob('*.sca')))
+                except Exception:
+                    pass
+        if all_sca_files:
+            try:
+                latest_sca_file = max(all_sca_files, key=lambda p: p.stat().st_mtime)
+            except Exception:
+                # Fallback: just take the first found
+                latest_sca_file = all_sca_files[0]
+        if latest_sca_file:
+            positions = Positions()
+            positions.load_from_scalars([latest_sca_file])
+            energy_totals = EnergyTotals()
+            energy_totals.load_from_scalars([latest_sca_file])
 
     # Compute report, including total energy if parsed
     total_energy_j: Optional[float] = None
@@ -331,7 +343,7 @@ def main() -> None:
     print(f"Wrote {len(report_rows)} rows to {args.output}")
     for row in report_rows:
         print(
-            f"{row['src']}->{row['dst']}: transit={row['transit_time_s']}s, hops={row['first_packet_hop_count']}, copies={row['copies_received_at_dst_for_first_packet']}, dist={row['distance_m']}, energyJ={row['total_energy_j']}"
+            f"{row['src']}->{row['dst']}: transit={row['transit_time_s']}s, hops={row['first_packet_hop_count']}, copies={row['copies_received_at_dst_for_first_packet']}, uniqueNodes={row['unique_nodes_processed_first_packet']}, dist={row['distance_m']}, energyJ={row['total_energy_j']}"
         )
 
 

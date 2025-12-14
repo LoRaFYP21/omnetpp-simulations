@@ -68,6 +68,10 @@ def parse_report_file(path):
         dist = find_first(r"Network span:\s*([-\d.]+)\s*meters")
     data['distance_m'] = dist
 
+    # total energy consumed by network (Joules)
+    energy_j = find_first(r"Total energy consumed by network:\s*([-\d.]+)\s*J")
+    data['total_energy_j'] = energy_j
+
     # totals
     data['total_generated'] = find_first(r"Total data packets generated:\s*(\d+)")
     data['total_delivered'] = find_first(r"Total data packets delivered:\s*(\d+)")
@@ -134,7 +138,7 @@ def main():
     fieldnames = [
         'report_file', 'results_dir',
         'endnode_1000_x','endnode_1000_y','endnode_1001_x','endnode_1001_y',
-        'distance_m','total_generated','total_delivered',
+        'distance_m','total_energy_j','total_generated','total_delivered',
         'delivered_any',
         'transit_time_s',
         'hop_counts','throughput_packets_per_s','nodes_processed'
