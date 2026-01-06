@@ -69,6 +69,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t sendDataPacket();
         simtime_t sendForwardPacket();
         simtime_t sendRoutingPacket();
+        simtime_t sendAckPacket(int destinationNode, int originalDataSeq);
         void manageReceivedPacketForMe(cMessage *msg);
         void manageReceivedAckPacketForMe(cMessage *msg);
         void manageReceivedDataPacketForMe(cMessage *msg);
@@ -81,6 +82,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void sendDownMgmtPacket();
         void generateDataPackets();
         void sanitizeRoutingTable();
+    void filterRoutesToEndNodes(); // keep only end-node (ID>=1000) routes
     // When enabled (storeBestRouteOnly), ensure at most one route per destination id
     void addOrReplaceBestSingleRoute(const singleMetricRoute &candidate);
         int pickCADSF();
@@ -99,12 +101,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t calculateTransmissionDuration(cMessage *msg);
 
 
-    // Routing table CSV logging helpers
+    // Routing / delivery logging helpers
     void openRoutingCsv();
     void logRoutingSnapshot(const char *eventName);
-    // Delivery logging helpers
     void openDeliveredCsv();
     void logDeliveredPacket(const LoRaAppPacket *packet);
+    // Path logging (per-hop) for ALL data packets (filter by destination offline)
+    void logPathHop(const LoRaAppPacket *packet, const char *eventTag);
+    void ensurePathLogInitialized();
 
     // Global failure subset (shared across instances)
     static bool globalFailureInitialized;        // whether subset was chosen
@@ -115,7 +119,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     static int globalTotalNodesObserved;          // track highest node index+1 seen
     void initGlobalFailureSelection();            // choose subset if needed
 
-    // Routing table export helper
+
     void exportRoutingTables(); // export routing tables at finish
 
 
@@ -162,6 +166,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         int lastSentMeasurement;
         int deletedRoutes;
         int forwardBufferFull;
+    // Strict unicast diagnostics
+    int unicastNoRouteDrops;          // packets we originated but dropped due to no route
+    int unicastWrongNextHopDrops;     // packets received for which we are neither destination nor intended via
+    int unicastFallbackBroadcasts;    // legacy fallback occurrences (should remain 0 after strict mode)
 
         simtime_t timeToFirstDataPacket;
         std::string timeToNextDataPacketDist;
@@ -256,6 +264,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         //Node info
         int nodeId;
+        int originalNodeIndex;  // Original index before ID offset for end nodes
 
         std::vector<int> neighbourNodes;
         std::vector<int> knownNodes;
@@ -322,6 +331,35 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::ofstream deliveredCsv;
     bool deliveredCsvReady = false;
     std::string deliveredCsvPath;
+
+    // Path log state (shared single file across all nodes)
+    bool pathLogReady = false;
+    std::string pathLogFile; // delivered_packets/paths.csv
+
+    // Convergence instrumentation: time when singleMetricRoutingTable first reaches 16 entries
+    simtime_t firstTimeReached16 = -1; // -1 indicates not yet reached
+    bool convergenceCsvReady = false;
+    std::string convergenceCsvPath; // delivered_packets/routing_convergence.csv
+
+    // Routing freeze feature
+    bool freezeRoutingAtThreshold = false;        // parameter value
+    int routingFreezeUniqueCount = 16;            // parameter value
+    bool routingFrozen = false;                   // becomes true once threshold reached (if feature enabled)
+    simtime_t routingFrozenTime = -1;             // when frozen
+    simtime_t freezeValidityHorizon = 0;          // horizon added to simTime when freezing routes
+
+    // Global routing convergence stop feature
+    bool stopRoutingWhenAllConverged = true;      // parameter value
+    // Track whether THIS node has already announced local convergence
+    bool locallyConverged = false;
+    // Static shared counters to coordinate a global stop across all nodes
+    static int globalNodesExpectingConvergence;   // total nodes considered for convergence
+    static int globalNodesConverged;              // how many have reached threshold
+    static bool globalConvergedFired;             // whether global stop already triggered
+    static std::string globalConvergenceCsvPath;  // shared path for events
+    static bool globalConvergenceCsvReady;        // header initialized
+    void announceLocalConvergenceIfNeeded(int uniqueCount);
+    void tryStopRoutingGlobally();
 
 
 

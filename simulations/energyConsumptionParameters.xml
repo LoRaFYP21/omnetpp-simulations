@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <root>
 	<supplyVoltage value="3.3"/>
-	<receiverReceivingSupplyCurrent value="9.7"/>
+	<receiverReceivingSupplyCurrent value="12"/>
 	<receiverBusySupplyCurrent value="9.7"/>
 	<idleSupplyCurrent value="0.0001"/>
 	<txSupplyCurrents>
@@ -18,5 +18,6 @@
 		<txSupplyCurrent txPower="12" supplyCurrent="34"/>
 		<txSupplyCurrent txPower="13" supplyCurrent="35"/>
 		<txSupplyCurrent txPower="14" supplyCurrent="44"/>
+		<txSupplyCurrent txPower="17" supplyCurrent="120"/>
 	</txSupplyCurrents>
 </root>

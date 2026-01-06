@@ -14,6 +14,9 @@
 //
 #include <iostream>
 #include <algorithm> // for std::max
+#include <set>
+#include <cstdio> // snprintf for dynamic event names
+#include <climits> // INT_MAX for end-node filtering
 
 #include "LoRaNodeApp.h"
 #include "inet/common/FSMA.h"
@@ -45,6 +48,34 @@ namespace inet {
 
 Define_Module (LoRaNodeApp);
 
+// ---------------------------------------------------------------------------
+// Routing Metric Enum Mapping (documentation)
+// NO_FORWARDING (0)                : Node generates/receives only; no forwarding logic.
+// FLOODING_BROADCAST_SINGLE_SF (1) : Blind broadcast forwarding using a single SF.
+// SMART_BROADCAST_SINGLE_SF (2)    : Broadcast with additional heuristics (e.g., duplicate avoidance).
+// HOP_COUNT_SINGLE_SF (3)          : Single-metric table; metric = hop count (lower is better).
+// RSSI_SUM_SINGLE_SF (4)           : Single-metric; metric = sum of RSSI along path (higher raw RSSI -> lower derived cost assumed).
+// RSSI_PROD_SINGLE_SF (5)          : Single-metric; metric = product/aggregation of RSSI factors.
+// ETX_SINGLE_SF (6)                : Single-metric; metric = Expected Transmission Count (lower = more reliable path).
+// TIME_ON_AIR_HC_CAD_SF (11)       : Dual-metric; primary combines time-on-air + hop count + CAD attempts.
+// TIME_ON_AIR_SF_CAD_SF (12)       : Dual-metric; primary combines time-on-air + spreading factor + CAD attempts.
+// ---------------------------------------------------------------------------
+// NOTE: Comments in some .ini files previously labelled metric 3 as ETX; this
+// patch clarifies correct mapping where 3 = HOP_COUNT and 6 = ETX.
+// ---------------------------------------------------------------------------
+
+// Helper: identify if this app instance belongs to an end node (host parameter iAmEnd=true)
+static inline bool isEndNodeHost(cSimpleModule* self) {
+    cModule *hostMod = getContainingNode(self);
+    if (!hostMod) return false;
+    if (!hostMod->hasPar("iAmEnd")) return false;
+    try {
+        return (bool)hostMod->par("iAmEnd");
+    } catch (...) {
+        return false;
+    }
+}
+
 void LoRaNodeApp::initialize(int stage) {
 
     cSimpleModule::initialize(stage);
@@ -67,6 +98,64 @@ void LoRaNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+        originalNodeIndex = nodeId;  // Store original index before offset
+        // If this node is an end node and participates in routing (routingMetric != 0),
+        // offset its ID to 1000+ to avoid collisions with relay IDs.
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd");
+            } else {
+                // Fallback: try detecting by vector base name
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName(); // "loRaNodes" or "loRaEndNodes"
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
+
+        // Initialize expected convergence count using only relay nodes
+        // Do this once globally; end nodes do not contribute to the expected count
+        if (stopRoutingWhenAllConverged && globalNodesExpectingConvergence == 0) {
+            int relayCount = 0;
+            try {
+                // Parameter holds relay array size in our networks
+                relayCount = par("numberOfNodes");
+            } catch (...) {
+                relayCount = numberOfNodes; // fallback to member
+            }
+            if (relayCount > 0) {
+                globalNodesExpectingConvergence = relayCount;
+            }
+        }
+
+        // Fresh path log per simulation run: have node 0 truncate and recreate header immediately
+        if (nodeId == 0) {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+            _mkdir(folder.c_str());
+#else
+            mkdir(folder.c_str(), 0775);
+#endif
+            std::stringstream pss; pss << folder << sep << "paths.csv";
+            std::ofstream pf(pss.str(), std::ios::out | std::ios::trunc);
+            if (pf.is_open()) {
+                pf << "simTime,event,packetSeq,src,dst,currentNode,ttlAfterDecr,chosenVia,nextHopType" << std::endl;
+                pf.close();
+            }
+            // Reset the flag used in ensurePathLogInitialized so it knows file already has header
+            pathLogReady = false; // will be set true on first ensurePathLogInitialized() call
+        }
         std::pair<double, double> coordsValues = std::make_pair(-1, -1);
         cModule *host = getContainingNode(this);
 
@@ -182,6 +271,9 @@ void LoRaNodeApp::initialize(int stage) {
         broadcastForwardedPackets = 0;
         deletedRoutes = 0;
         forwardBufferFull = 0;
+    unicastNoRouteDrops = 0;
+    unicastWrongNextHopDrops = 0;
+    unicastFallbackBroadcasts = 0;
 
         firstDataPacketTransmissionTime = 0;
         lastDataPacketTransmissionTime = 0;
@@ -252,6 +344,68 @@ void LoRaNodeApp::initialize(int stage) {
         getRoutesFromDataPackets = par("getRoutesFromDataPackets");
         packetTTL = par("packetTTL");
         stopRoutingAfterDataDone = par("stopRoutingAfterDataDone");
+
+        // Routing freeze parameters
+        if (hasPar("freezeRoutingAtThreshold"))
+            freezeRoutingAtThreshold = par("freezeRoutingAtThreshold");
+        if (hasPar("routingFreezeUniqueCount"))
+            routingFreezeUniqueCount = par("routingFreezeUniqueCount");
+        if (hasPar("stopRoutingWhenAllConverged"))
+            stopRoutingWhenAllConverged = par("stopRoutingWhenAllConverged");
+        if (hasPar("freezeValidityHorizon")) {
+            // Clamp to a reasonable positive value; OMNeT++ simtime range with scale exponent -10 is ~ +/-9.22e8 seconds
+            double horizon = par("freezeValidityHorizon").doubleValue();
+            if (horizon <= 0) {
+                // fallback: 10 * routeTimeout or 1e5 whichever greater
+                double fallback = std::max(1e5, 10.0 * routeTimeout.dbl());
+                EV_WARN << "freezeValidityHorizon <= 0 supplied; using fallback " << fallback << "s" << endl;
+                horizon = fallback;
+            } else if (horizon > 9.0e8) {
+                EV_WARN << "freezeValidityHorizon=" << horizon << " too large; clamping to 9.0e8s to avoid simtime overflow" << endl;
+                horizon = 9.0e8; // keep a safety margin
+            }
+            freezeValidityHorizon = horizon; // stored as simtime_t later when used
+        } else {
+            // Parameter absent (older configs) -> derive heuristic
+            double fallback = std::max(1e5, 10.0 * routeTimeout.dbl());
+            freezeValidityHorizon = fallback;
+        }
+        routingFrozen = false;
+        routingFrozenTime = -1;
+        locallyConverged = false;
+
+        // Initialize global convergence accounting once per process
+        // Determine participating nodes: use numberOfNodes (relay nodes) unless routingMetric == 0 (end nodes)
+        if (globalNodesExpectingConvergence == 0) {
+            // We consider all nodes in the loRaNodes vector as participants for simplicity
+            int totalCandidates = par("numberOfNodes");
+            if (totalCandidates <= 0) totalCandidates = 0;
+            globalNodesExpectingConvergence = totalCandidates;
+        }
+        // Prepare global CSV once
+        if (!globalConvergenceCsvReady) {
+#ifdef _WIN32
+            const char sep = '\\';
+#else
+            const char sep = '/';
+#endif
+            std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+            _mkdir(folder.c_str());
+#else
+            mkdir(folder.c_str(), 0775);
+#endif
+            std::stringstream gss; gss << folder << sep << "global_routing_convergence.csv";
+            globalConvergenceCsvPath = gss.str();
+            std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+            if (gf.is_open()) {
+                if (gf.tellp() == 0) {
+                    gf << "simTime,event,nodeId,uniqueCount,totalNodes,threshold" << std::endl;
+                }
+                gf.close();
+                globalConvergenceCsvReady = true;
+            }
+        }
 
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
@@ -335,15 +489,33 @@ void LoRaNodeApp::initialize(int stage) {
         singleMetricRoutingTable = {};
         dualMetricRoutingTable = {};
 
-    // Prepare routing CSV path (per-node file)
+    // Note: prepare CSV paths after nodeId is known (set further down)
+
+
+        //Node identifier (re-assign and apply end-node offset when participating in routing)
+            nodeId = getContainingNode(this)->getIndex();
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd").boolValue();
+            } else {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
+
+    // Prepare routing CSV path (per-node file) now that nodeId is set
     openRoutingCsv();
 
     // Prepare delivered CSV path (per-node file)
     openDeliveredCsv();
-
-
-        //Node identifier
-        nodeId = getContainingNode(this)->getIndex();
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -441,7 +613,8 @@ void LoRaNodeApp::initialize(int stage) {
                 break;
             // Schedule selfRoutingPackets
             default:
-                routingPacketsDue = true;
+        // If global convergence already announced, suppress routing beacons
+        routingPacketsDue = ! (stopRoutingWhenAllConverged && globalConvergedFired);
                 nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
                 EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
                 break;
@@ -611,9 +784,19 @@ void LoRaNodeApp::finish() {
     recordScalar("failed", failed ? 1 : 0);
     if (failureTime >= SIMTIME_ZERO)
         recordScalar("failureTime", failureTime);
+    // Freeze related scalars
+    recordScalar("freezeValidityHorizon", freezeValidityHorizon.dbl());
+    recordScalar("routingFrozen", routingFrozen ? 1 : 0);
+    if (routingFrozenTime >= SIMTIME_ZERO)
+        recordScalar("routingFrozenTime", routingFrozenTime);
 
-    // Export routing tables (CSV + TXT snapshot at end)
-    exportRoutingTables();
+    // Export detailed routing tables only if explicitly enabled.
+    // By default (parameter absent or false) we skip generating node_<id>_single.csv,
+    // node_<id>_dual.csv and node_<id>_routing_table.txt, keeping only live snapshot
+    // files node_<id>_routing.csv produced by logRoutingSnapshot().
+    if (hasPar("exportDetailedRoutingTables") && par("exportDetailedRoutingTables").boolValue()) {
+        exportRoutingTables();
+    }
 
     recordScalar("sentPackets", sentPackets);
     recordScalar("sentDataPackets", sentDataPackets);
@@ -664,32 +847,20 @@ void LoRaNodeApp::finish() {
     recordScalar("firstACKSF", firstACKSF);
 
     recordScalar("dataPacketsNotSent", LoRaPacketsToSend.size());
-    recordScalar("forwardPacketsNotSent", LoRaPacketsToSend.size());
+    // FIX: forwardPacketsNotSent previously (incorrectly) used LoRaPacketsToSend.size()
+    recordScalar("forwardPacketsNotSent", LoRaPacketsToForward.size());
 
     recordScalar("forwardBufferFull", forwardBufferFull);
+    // Strict unicast scalars
+    recordScalar("unicastNoRouteDrops", unicastNoRouteDrops);
+    recordScalar("unicastWrongNextHopDrops", unicastWrongNextHopDrops);
+    recordScalar("unicastFallbackBroadcasts", unicastFallbackBroadcasts);
 
-    for (std::vector<LoRaAppPacket>::iterator lbptr = LoRaPacketsToSend.begin();
-            lbptr < LoRaPacketsToSend.end(); lbptr++) {
-        LoRaPacketsToSend.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            LoRaPacketsToForward.begin(); lbptr < LoRaPacketsToForward.end();
-            lbptr++) {
-        LoRaPacketsToForward.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            LoRaPacketsForwarded.begin(); lbptr < LoRaPacketsForwarded.end();
-            lbptr++) {
-        LoRaPacketsForwarded.erase(lbptr);
-    }
-
-    for (std::vector<LoRaAppPacket>::iterator lbptr =
-            DataPacketsForMe.begin(); lbptr < DataPacketsForMe.end();
-            lbptr++) {
-        DataPacketsForMe.erase(lbptr);
-    }
+    // Replace unsafe erase-in-loop (iterator invalidation) with clear() operations.
+    LoRaPacketsToSend.clear();
+    LoRaPacketsToForward.clear();
+    LoRaPacketsForwarded.clear();
+    DataPacketsForMe.clear();
 
     recordScalar("dataPacketsForMeLatencyMax", dataPacketsForMeLatency.getMax());
     recordScalar("dataPacketsForMeLatencyMean", dataPacketsForMeLatency.getMean());
@@ -753,6 +924,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
     if (failed) {
         return; // Ignore timers after failure
+    }
+
+    // If global convergence reached, stop routing immediately in all nodes
+    if (globalConvergedFired) {
+        routingPacketsDue = false;
     }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
@@ -861,7 +1037,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         if ( LoRaPacketsToSend.size() > 0 )
             dataPacketsDue = true;
         if ( LoRaPacketsToForward.size() > 0 )
-            forwardPacketsDue = false;
+            forwardPacketsDue = true;  // FIXED: Set to true when packets need forwarding
         // routingPackets due is handled below.
 
         // Calculate next schedule time, first based on routing packets next transmission time,
@@ -951,45 +1127,57 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
 
         std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
 
+        // Path instrumentation: log destination reception prior to processing
+        if (packet->getMsgType() == DATA) {
+            logPathHop(packet, "RX_DST_PRE");
+        }
+
         manageReceivedPacketForMe(packet);
         if (firstDataPacketReceptionTime == 0) {
             firstDataPacketReceptionTime = simTime();
         }
         lastDataPacketReceptionTime = simTime();
     }
-    // Else it can be a routing protocol broadcast message
+    // Else possible routing protocol broadcast
     else if (packet->getDestination() == BROADCAST_ADDRESS) {
-        manageReceivedRoutingPacket(packet);
+        manageReceivedRoutingPacket(packet); // still processed as before
     }
-    // Else it can be a data packet from and to other nodes...
+    // Else data packet between other nodes (forwarding decision)
     else {
-        // which we may forward, if it is being broadcast
-        if (packet->getVia() == BROADCAST_ADDRESS && routeDiscovery == true) {
-
-            std::cout << "msg type broadcast and route : " << packet->getMsgType() << std::endl;
-
-            bubble("I received a multicast data packet to forward!");
-            manageReceivedDataPacketToForward(packet);
-            if (firstDataPacketReceptionTime == 0) {
-                firstDataPacketReceptionTime = simTime();
+        bool broadcastMode = (routingMetric == FLOODING_BROADCAST_SINGLE_SF || routingMetric == SMART_BROADCAST_SINGLE_SF);
+        if (broadcastMode) {
+            // Legacy behaviour for broadcast-based dissemination
+            if (packet->getVia() == BROADCAST_ADDRESS) {
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else if (packet->getVia() == nodeId) { // targeted within broadcast metric (rare)
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else {
+                // Ignore silently: broadcast metric but not intended next hop
+                unicastWrongNextHopDrops++; // reuse counter for diagnostics
             }
-            lastDataPacketReceptionTime = simTime();
-        }
-        // or unicast via this node
-        else if (packet->getVia() == nodeId) {
-            bubble("I received a unicast data packet to forward!");
-            manageReceivedDataPacketToForward(packet);
-            if (firstDataPacketReceptionTime == 0) {
-                firstDataPacketReceptionTime = simTime();
+        } else {
+            // Unicast metrics with possible fallback broadcast when a sender had no route.
+            // Accept if we are the explicit next hop OR if the packet was broadcast fallback (via == BROADCAST_ADDRESS).
+            if (packet->getVia() == nodeId || packet->getVia() == BROADCAST_ADDRESS) {
+                // Count fallback broadcasts only when they are actually processed (diagnostic).
+                if (packet->getVia() == BROADCAST_ADDRESS) {
+                    unicastFallbackBroadcasts++; // repurpose counter: processed fallback broadcasts
+                }
+                // Path instrumentation: log reception before forwarding logic
+                if (packet->getMsgType() == DATA) {
+                    logPathHop(packet, "RX_FWD_PRE");
+                }
+                manageReceivedDataPacketToForward(packet);
+                if (firstDataPacketReceptionTime == 0) firstDataPacketReceptionTime = simTime();
+                lastDataPacketReceptionTime = simTime();
+            } else {
+                // We overheard a unicast not for us: drop silently (diagnostic count)
+                unicastWrongNextHopDrops++;
             }
-            lastDataPacketReceptionTime = simTime();
-        }
-        // or not, if it's a unicast packet we just happened to receive.
-        else {
-            bubble("Unicast message not for me! but still forwarding");
-            manageReceivedDataPacketToForward(packet);
-            receivedDataPackets++;
-            lastDataPacketReceptionTime = simTime();
         }
     }
 
@@ -1004,9 +1192,36 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     // Check it actually is a routing message
     if (packet->getMsgType() == ROUTING) {
 
+        // If routing is frozen, we still count the packet but ignore any table modifications
+        if (routingFrozen) {
+            receivedRoutingPackets++;
+            return; // tables remain stable
+        }
+
         receivedRoutingPackets++;
 
     sanitizeRoutingTable();
+
+    // End-node advertise-only behavior: ignore routing table modifications to remain stateless
+    if (isEndNodeHost(this)) {
+        // Keep statistics/logging stable; just snapshot the (empty or static) table and return
+        routingTableSize.collect(singleMetricRoutingTable.size());
+
+    // ------------------------------------------------------------------
+    // FILTER: Retain only routes that lead to end nodes (IDs >= 1000).
+    // Requirement: Relay nodes should keep ONLY routes to end nodes
+    // (e.g., 1000, 1001) and discard intermediate relay destinations.
+    // End node IDs are offset by +1000 earlier during initialization.
+    // We derive end node range from numberOfEndNodes parameter if present;
+    // fallback: assume any id >= 1000 is an end node.
+    // ------------------------------------------------------------------
+    filterRoutesToEndNodes();
+
+    // After filtering, collect the (reduced) size again to reflect final table
+    routingTableSize.collect(singleMetricRoutingTable.size());
+        logRoutingSnapshot("routing_packet_ignored_endnode");
+        return;
+    }
 
         switch (routingMetric) {
 
@@ -1158,6 +1373,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             case TIME_ON_AIR_HC_CAD_SF:
                 bubble("Processing routing packet");
+                if (routingFrozen) break; // skip modifications when frozen
 
                 if ( !isRouteInDualMetricRoutingTable(packet->getSource(), packet->getSource(), packet->getOptions().getLoRaSF())) {
 //                    EV << "Adding neighbour " << packet->getSource() << " with SF " << packet->getOptions().getLoRaSF() << endl;
@@ -1204,6 +1420,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             case TIME_ON_AIR_SF_CAD_SF:
                 bubble("Processing routing packet");
+                if (routingFrozen) break; // skip modifications when frozen
 
 //                EV << "Processing routing packet in node " << nodeId << endl;
 //                EV << "Routing table size: " << end(dualMetricRoutingTable) - begin(dualMetricRoutingTable) << endl;
@@ -1253,11 +1470,16 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
             default:
                 break;
-        }
-        routingTableSize.collect(singleMetricRoutingTable.size());
+    }
 
-        // Log snapshot after processing routing packet
-        logRoutingSnapshot("routing_packet_processed");
+    // Enforce relay-side filtering: keep only end-node destinations in tables
+    // before collecting size and logging the snapshot. This ensures
+    // node_X_routing.csv reflects only end-node routes (e.g., 1000, 1001).
+    filterRoutesToEndNodes();
+    routingTableSize.collect(singleMetricRoutingTable.size());
+
+    // Log snapshot after processing routing packet (post-filtering)
+    logRoutingSnapshot("routing_packet_processed");
     }
 
     EV << "## Routing table at node " << nodeId << "##" << endl;
@@ -1270,6 +1492,8 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 // Helper: keep only the best route per destination (single-metric tables)
 // Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
 void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
+    // If routing already frozen, ignore any new candidate to keep table stable
+    if (routingFrozen) return;
     // Make a safe copy because we'll potentially erase from the vector
     LoRaNodeApp::singleMetricRoute cand = candidate;
     // Find all entries for this destination id
@@ -1314,7 +1538,120 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
         }
         // else do nothing (keep the existing best)
     }
+
+    // After any insertion, check if we just reached threshold unique destinations (default 16)
+    if (firstTimeReached16 < SIMTIME_ZERO) {
+        std::set<int> uniqueIds;
+        for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
+        if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
+            firstTimeReached16 = simTime();
+            // Lazy-open convergence CSV (node 0 creates header, others append)
+            if (!convergenceCsvReady) {
+#ifdef _WIN32
+                const char sep = '\\';
+#else
+                const char sep = '/';
+#endif
+                std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+                _mkdir(folder.c_str());
+#else
+                mkdir(folder.c_str(), 0775);
+#endif
+                std::stringstream css; css << folder << sep << "routing_convergence.csv";
+                convergenceCsvPath = css.str();
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    if (cf.tellp() == 0) {
+                        cf << "simTime,event,nodeId,threshold,uniqueCount" << std::endl;
+                    }
+                    cf.close();
+                    convergenceCsvReady = true;
+                }
+            }
+            if (convergenceCsvReady) {
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    // Dynamic event label (retain legacy REACHED16 name when threshold==16 for backward compatibility)
+                    if (routingFreezeUniqueCount == 16) {
+                        cf << simTime() << ",REACHED16," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                    } else {
+                        char ev[32];
+                        std::snprintf(ev, sizeof(ev), "REACHED%d", routingFreezeUniqueCount);
+                        cf << simTime() << "," << ev << "," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                    }
+                    cf.close();
+                }
+            }
+            // If freeze is enabled and not yet frozen, apply freeze now
+            if (freezeRoutingAtThreshold && !routingFrozen) {
+                routingFrozen = true;
+                routingFrozenTime = simTime();
+                // Extend validity horizons using configured freezeValidityHorizon
+                simtime_t extendBy = freezeValidityHorizon; // already clamped during initialize
+                for (auto &r : singleMetricRoutingTable) {
+                    r.valid = simTime() + extendBy;
+                }
+                for (auto &r : dualMetricRoutingTable) {
+                    r.valid = simTime() + extendBy;
+                }
+                // Log FREEZE event
+                if (convergenceCsvReady) {
+                    std::ofstream cf2(convergenceCsvPath, std::ios::out | std::ios::app);
+                    if (cf2.is_open()) {
+                        cf2 << simTime() << ",FREEZE," << nodeId << "," << routingFreezeUniqueCount << "," << uniqueIds.size() << std::endl;
+                        cf2.close();
+                    }
+                }
+            }
+            // Announce local convergence into the global aggregator
+            if (stopRoutingWhenAllConverged) {
+                announceLocalConvergenceIfNeeded((int)uniqueIds.size());
+                tryStopRoutingGlobally();
+            }
+        }
+    }
+
 }
+
+// When this node reaches threshold the first time, bump the global counter and log
+void LoRaNodeApp::announceLocalConvergenceIfNeeded(int uniqueCount) {
+    // End nodes (iAmEnd=true) do not contribute to the global convergence count
+    if (isEndNodeHost(this)) return;
+    if (locallyConverged) return;
+    locallyConverged = true;
+    // Increase shared count
+    globalNodesConverged++;
+    if (globalConvergenceCsvReady) {
+        std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+        if (gf.is_open()) {
+            gf << simTime() << ",NODE_CONVERGED," << nodeId << "," << uniqueCount << "," << globalNodesExpectingConvergence << "," << routingFreezeUniqueCount << std::endl;
+            gf.close();
+        }
+    }
+}
+
+// If all nodes are converged, stop routing packets across the network
+void LoRaNodeApp::tryStopRoutingGlobally() {
+    if (!stopRoutingWhenAllConverged) return;
+    if (globalConvergedFired) return;
+    if (globalNodesExpectingConvergence <= 0) return; // nothing to do
+    if (globalNodesConverged < globalNodesExpectingConvergence) return;
+    // Fire once
+    globalConvergedFired = true;
+    // Broadcast-style stop: each node will see this condition independently; we set routingPacketsDue=false locally
+    routingPacketsDue = false;
+    // Also log a GLOBAL_CONVERGED event
+    if (globalConvergenceCsvReady) {
+        std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);
+        if (gf.is_open()) {
+            gf << simTime() << ",GLOBAL_CONVERGED," << nodeId << ",,"
+               << globalNodesExpectingConvergence << "," << routingFreezeUniqueCount << std::endl;
+            gf.close();
+        }
+    }
+}
+
 
 
 void LoRaNodeApp::openRoutingCsv() {
@@ -1383,6 +1720,72 @@ void LoRaNodeApp::logDeliveredPacket(const LoRaAppPacket *packet) {
                  << std::endl;
     deliveredCsv.flush();
     deliveredCsv.close();
+
+    // Mark path completion for any delivered packet
+    logPathHop(packet, "DELIVERED");
+}
+
+// Initialize global path log file once (all nodes append)
+void LoRaNodeApp::ensurePathLogInitialized() {
+    // We want a fresh paths.csv for each simulation run. Use a static process-wide flag.
+    static bool pathLogClearedThisRun = false;
+    if (pathLogReady) return; // This instance already initialized its handle
+
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+    std::stringstream ss;
+    ss << folder << sep << "paths.csv"; // single consolidated file
+    pathLogFile = ss.str();
+
+    // If not yet cleared this run, truncate and write header once.
+    if (!pathLogClearedThisRun) {
+        std::ofstream f(pathLogFile, std::ios::out | std::ios::trunc);
+        if (f.is_open()) {
+            f << "simTime,event,packetSeq,src,dst,currentNode,ttlAfterDecr,chosenVia,nextHopType" << std::endl;
+            f.close();
+            pathLogClearedThisRun = true;
+            pathLogReady = true;
+        }
+    } else {
+        // Already cleared by another module instance; just mark ready (file exists with header)
+        pathLogReady = true;
+    }
+}
+
+// Log each hop (transmission decision) for every data packet
+void LoRaNodeApp::logPathHop(const LoRaAppPacket *packet, const char *eventTag) {
+    EV << "DEBUG: logPathHop called for node " << nodeId << ", event: " << eventTag << ", packet src=" << packet->getSource() << ", dst=" << packet->getDestination() << endl;
+    std::cout << "DEBUG: logPathHop called for node " << nodeId << ", event: " << eventTag << ", packet src=" << packet->getSource() << ", dst=" << packet->getDestination() << std::endl;
+    
+    ensurePathLogInitialized();
+    if (!pathLogReady) {
+        EV << "DEBUG: pathLogReady is false, returning" << endl;
+        std::cout << "DEBUG: pathLogReady is false, returning" << std::endl;
+        return;
+    }
+    std::ofstream f(pathLogFile, std::ios::out | std::ios::app);
+    if (!f.is_open()) return;
+    const char *nhType = (packet->getVia() == BROADCAST_ADDRESS) ? "BCAST" : "UNICAST";
+    f << simTime() << ","
+      << eventTag << ","
+      << packet->getDataInt() << "," // using dataInt as sequence identifier
+      << packet->getSource() << ","
+      << packet->getDestination() << ","
+      << nodeId << ","
+      << packet->getTtl() << ","
+      << packet->getVia() << ","
+      << nhType
+      << std::endl;
+    f.close();
 }
 
 
@@ -1449,6 +1852,8 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
 }
 
 void LoRaNodeApp::manageReceivedPacketToForward(cMessage *msg) {
+    // End nodes operate as sources/sinks only; they do not forward others' packets
+    if (isEndNodeHost(this)) { delete msg; return; }
     receivedPacketsToForward++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
@@ -1470,6 +1875,83 @@ void LoRaNodeApp::manageReceivedPacketToForward(cMessage *msg) {
 void LoRaNodeApp::manageReceivedAckPacketToForward(cMessage *msg) {
     receivedAckPackets++;
     receivedAckPacketsToForward++;
+    bool newAckToForward = false;
+
+    LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+    LoRaAppPacket *ackPacket = packet->dup();
+
+    // Check for too old ACK packets with TTL <= 1
+    if (packet->getTtl() <= 1) {
+        bubble("This ACK packet has reached TTL expiration!");
+        receivedAckPacketsToForwardExpired++;
+    }
+    // ACK packet has not reached its maximum TTL
+    else {
+        receivedAckPacketsToForwardCorrect++;
+
+        switch (routingMetric) {
+            case NO_FORWARDING:
+                bubble("Discarding ACK packet as forwarding is disabled");
+                break;
+
+            case FLOODING_BROADCAST_SINGLE_SF:
+            case SMART_BROADCAST_SINGLE_SF:
+            case HOP_COUNT_SINGLE_SF:
+            case RSSI_SUM_SINGLE_SF:
+            case RSSI_PROD_SINGLE_SF:
+            case ETX_SINGLE_SF:
+            case TIME_ON_AIR_HC_CAD_SF:
+            case TIME_ON_AIR_SF_CAD_SF:
+            default:
+                // Check if the ACK packet has already been forwarded
+                if (isPacketForwarded(packet)) {
+                    bubble("This ACK packet has already been forwarded!");
+                    forwardPacketsDuplicateAvoid++;
+                }
+                // Check if the ACK packet is buffered to be forwarded
+                else if (isPacketToBeForwarded(packet)) {
+                    bubble("This ACK packet is already scheduled to be forwarded!");
+                    forwardPacketsDuplicateAvoid++;
+                }
+                // A previously-unknown ACK packet has arrived
+                else {
+                    bubble("Saving ACK packet to forward it later!");
+                    receivedAckPacketsToForwardUnique++;
+
+                    ackPacket->setTtl(packet->getTtl() - 1);
+                    if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size() < packetsToForwardMaxVectorSize) {
+                        LoRaPacketsToForward.push_back(*ackPacket);
+                        // Debug instrumentation: log enqueue of a forward ACK packet
+                        logPathHop(ackPacket, "ENQUEUE_ACK_FWD");
+                        newAckToForward = true;
+                    }
+                    else {
+                        forwardBufferFull++;
+                    }
+                }
+        }
+    }
+
+    delete ackPacket;
+
+    if (newAckToForward) {
+        forwardPacketsDue = true;
+
+        if (!selfPacket->isScheduled()) {
+            simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
+
+            if (enforceDutyCycle) {
+                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+            }
+
+            if (!(nextScheduleTime > simTime())) {
+                nextScheduleTime = simTime() + 1;
+            }
+
+            scheduleAt(nextScheduleTime, selfPacket);
+            forwardPacketsDue = true;
+        }
+    }
 }
 
 void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
@@ -1521,6 +2003,8 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
                     dataPacket->setTtl(packet->getTtl() - 1);
                     if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size()<packetsToForwardMaxVectorSize) {
                         LoRaPacketsToForward.push_back(*dataPacket);
+                        // Debug instrumentation: log enqueue of a forward packet (all flows)
+                        logPathHop(dataPacket, "ENQUEUE_FWD");
                         newPacketToForward = true;
                     }
                     else {
@@ -1564,9 +2048,12 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
         // Log definitive delivery and emit a signal for statistics
         logDeliveredPacket(packet);
         emit(LoRa_AppPacketDelivered, (long)packet->getSource());
-        // Existing behavior: forward even at destination (can be tightened later)
-        std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
-        manageReceivedDataPacketToForward(packet);
+        
+        // Generate ACK packet back to source using routing tables
+        EV << "Destination received DATA packet from " << packet->getSource() << ", generating ACK" << endl;
+        sendAckPacket(packet->getSource(), packet->getDataInt());
+        
+        // Strict unicast: stop here, do NOT forward further
         break;
         // ACK packet
     case ACK:
@@ -1597,8 +2084,23 @@ void LoRaNodeApp::manageReceivedAckPacketForMe(cMessage *msg) {
     receivedAckPacketsForMe++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
-
-    // Optional: do something with the packet
+    
+    // Log ACK reception with round-trip information
+    EV << "Node " << nodeId << " received ACK from " << packet->getSource() 
+       << " for data packet seq " << packet->getDataInt() 
+       << " at time " << simTime() << endl;
+    
+    bubble("Received ACK!");
+    
+    // Calculate round-trip time if departure time is available
+    if (packet->getDepartureTime() > 0) {
+        simtime_t roundTripTime = simTime() - packet->getDepartureTime();
+        EV << "Round-trip time for seq " << packet->getDataInt() 
+           << ": " << roundTripTime << "s" << endl;
+    }
+    
+    // Log ACK delivery
+    logPathHop(packet, "ACK_DELIVERED");
 }
 
 bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
@@ -1763,7 +2265,8 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                 if ( routeIndex >= 0 ) {
                     dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
-                else{
+                else {
+                    // Broadcast fallback when no route known
                     dataPacket->setVia(BROADCAST_ADDRESS);
                     if (localData)
                         broadcastDataPackets++;
@@ -1777,7 +2280,7 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                     dataPacket->setVia(dualMetricRoutingTable[routeIndex].via);
                     cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
                 }
-                else{
+                else {
                     dataPacket->setVia(BROADCAST_ADDRESS);
                     if (localData)
                         broadcastDataPackets++;
@@ -1786,6 +2289,9 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                 }
                 break;
         }
+
+        // Log hop decision for all flows
+        logPathHop(dataPacket, localData ? "TX_SRC" : "TX_FWD");
 
         dataPacket->setControlInfo(cInfo);
 
@@ -1877,7 +2383,11 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                     if (!isPacketForwarded(forwardPacket)) {
                         bubble("Forwarding packet!");
                         forwardedPackets++;
-                        forwardedDataPackets++;
+                        if (forwardPacket->getMsgType() == DATA) {
+                            forwardedDataPackets++;
+                        } else if (forwardPacket->getMsgType() == ACK) {
+                            forwardedAckPackets++;
+                        }
                         transmit = true;
 
                         // Keep a copy of the forwarded packet to avoid sending it again if received later on
@@ -1943,6 +2453,13 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
                 break;
         }
 
+        // Log all forwarded transmissions with specific packet type
+        if (forwardPacket->getMsgType() == ACK) {
+            logPathHop(forwardPacket, "TX_FWD_ACK");
+        } else {
+            logPathHop(forwardPacket, "TX_FWD_DATA");
+        }
+
         forwardPacket->setControlInfo(cInfo);
 
         txDuration = calculateTransmissionDuration(forwardPacket);
@@ -1967,6 +2484,8 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
 
 simtime_t LoRaNodeApp::sendRoutingPacket() {
     if (failed) return 0; // Do not send after failure
+    // If global convergence (based on relays) has been reached, stop sending routing beacons from all nodes
+    if (globalConvergedFired) return 0;
 
     bool transmit = false;
     simtime_t txDuration = 0;
@@ -2004,27 +2523,36 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 
             transmit = true;
 
-            // Count the number of best routes
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
-                        numberOfRoutes++;
-                    }
+            // Ensure we advertise only end-node routes (strip others first)
+            filterRoutesToEndNodes();
+
+            // Build a unique set of destination IDs from the current routing table,
+            // so we can advertise ALL known destinations (including end-node IDs like 1000/1001),
+            // not only the relay index range [0..numberOfNodes-1].
+            {
+                std::set<int> destIds;
+                for (const auto &r : singleMetricRoutingTable) {
+                    if (r.id != nodeId)
+                        destIds.insert(r.id);
                 }
-            }
 
-            // Make room for numberOfRoutes routes
-            routingPacket->setRoutingTableArraySize(numberOfRoutes);
+                // Count the number of best routes among known destinations
+                for (int did : destIds) {
+                    if (getBestRouteIndexTo(did) >= 0)
+                        numberOfRoutes++;
+                }
 
-            // Add the best route to each node
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
+                // Make room for numberOfRoutes routes
+                routingPacket->setRoutingTableArraySize(numberOfRoutes);
 
+                // Add the best route for each known destination
+                for (int did : destIds) {
+                    int bestIdx = getBestRouteIndexTo(did);
+                    if (bestIdx >= 0) {
                         LoRaRoute thisLoRaRoute;
-                        thisLoRaRoute.setId(singleMetricRoutingTable[getBestRouteIndexTo(i)].id);
-                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[getBestRouteIndexTo(i)].metric);
-                        routingPacket->setRoutingTable(numberOfRoutes-1, thisLoRaRoute);
+                        thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
+                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
+                        routingPacket->setRoutingTable(numberOfRoutes - 1, thisLoRaRoute);
                         numberOfRoutes--;
                     }
                 }
@@ -2035,6 +2563,9 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
         case TIME_ON_AIR_HC_CAD_SF:
         case TIME_ON_AIR_SF_CAD_SF:
             transmit = true;
+
+            // Ensure we advertise only end-node routes (strip others first)
+            filterRoutesToEndNodes();
 
             loRaSF = pickCADSF();
             cInfo->setLoRaSF(loRaSF);
@@ -2092,16 +2623,120 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
     return txDuration;
 }
 
+simtime_t LoRaNodeApp::sendAckPacket(int destinationNode, int originalDataSeq) {
+    if (failed) return 0; // Do not send after failure
+
+    LoRaAppPacket *ackPacket = new LoRaAppPacket("ACKFrame");
+    simtime_t txDuration = 0;
+
+    bubble("Sending ACK packet!");
+    
+    // Set up ACK packet properties
+    ackPacket->setMsgType(ACK);
+    ackPacket->setSource(nodeId);
+    ackPacket->setDestination(destinationNode);
+    ackPacket->setDataInt(originalDataSeq);  // Include original packet sequence for tracking
+    ackPacket->setTtl(packetTTL);           // Use same TTL as data packets
+    ackPacket->setByteLength(11);           // Small ACK packet size
+    ackPacket->setDepartureTime(simTime());
+
+    // Name packet for tracking
+    std::string fullName = "ACK-";
+    fullName += std::to_string(nodeId);
+    fullName += "-to-";
+    fullName += std::to_string(destinationNode);
+    fullName += "-seq-";
+    fullName += std::to_string(originalDataSeq);
+    ackPacket->setName(fullName.c_str());
+
+    // Add LoRa control info
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+
+    // Sanitize routing table before route lookup
+    sanitizeRoutingTable();
+
+    // Find route to destination using routing tables
+    int routeIndex = getBestRouteIndexTo(destinationNode);
+
+    switch (routingMetric) {
+        case FLOODING_BROADCAST_SINGLE_SF:
+            ackPacket->setVia(BROADCAST_ADDRESS);
+            broadcastDataPackets++;
+            break;
+        case SMART_BROADCAST_SINGLE_SF:
+        case HOP_COUNT_SINGLE_SF:
+        case RSSI_SUM_SINGLE_SF:
+        case RSSI_PROD_SINGLE_SF:
+        case ETX_SINGLE_SF:
+            if (routeIndex >= 0) {
+                ackPacket->setVia(singleMetricRoutingTable[routeIndex].via);
+                EV << "ACK routed to " << destinationNode << " via " << singleMetricRoutingTable[routeIndex].via << endl;
+            } else {
+                // Fallback to broadcast if no route known
+                ackPacket->setVia(BROADCAST_ADDRESS);
+                broadcastDataPackets++;
+                EV << "No route to " << destinationNode << " for ACK, using broadcast fallback" << endl;
+            }
+            break;
+        case TIME_ON_AIR_HC_CAD_SF:
+        case TIME_ON_AIR_SF_CAD_SF:
+            if (routeIndex >= 0) {
+                ackPacket->setVia(dualMetricRoutingTable[routeIndex].via);
+                cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
+                EV << "ACK routed to " << destinationNode << " via " << dualMetricRoutingTable[routeIndex].via << endl;
+            } else {
+                ackPacket->setVia(BROADCAST_ADDRESS);
+                broadcastDataPackets++;
+                EV << "No route to " << destinationNode << " for ACK, using broadcast fallback" << endl;
+            }
+            break;
+        default:
+            ackPacket->setVia(BROADCAST_ADDRESS);
+            break;
+    }
+
+    // Log ACK transmission
+    logPathHop(ackPacket, "TX_ACK");
+
+    ackPacket->setControlInfo(cInfo);
+    txDuration = calculateTransmissionDuration(ackPacket);
+
+    // Update statistics
+    sentPackets++;
+    sentAckPackets++;
+    allTxPacketsSFStats.collect(loRaSF);
+
+    // Send the ACK packet
+    send(ackPacket, "appOut");
+    
+    EV << "Sent ACK from " << nodeId << " to " << destinationNode << " for data seq " << originalDataSeq << endl;
+    
+    return txDuration;
+}
+
 void LoRaNodeApp::generateDataPackets() {
     if (failed) return; // Do not generate after failure
 
-    if (!onlyNode0SendsPackets || nodeId == 0) {
+    EV << "DEBUG: generateDataPackets() called for node " << nodeId << " (originalIndex=" << originalNodeIndex << ")" << endl;
+    std::cout << "DEBUG: generateDataPackets() called for node " << nodeId << " (originalIndex=" << originalNodeIndex << ")" << std::endl;
+
+    if (!onlyNode0SendsPackets || originalNodeIndex == 0) {
+        EV << "DEBUG: Packet generation condition met for node " << nodeId << endl;
+        std::cout << "DEBUG: Packet generation condition met for node " << nodeId << std::endl;
+        
         std::vector<int> destinations = { };
-        // If configured, force node 0 to send only to a specific destination
+        // If configured, force this node to send only to a specific destination (supports any node ID, including 1000/1001)
         bool forceSingleDestination = par("forceSingleDestination");
         int forcedDestinationId = par("forcedDestinationId");
-        if (forceSingleDestination && nodeId == 0 && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+        if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId != nodeId) {
             destinations.push_back(forcedDestinationId);
+            EV << "DEBUG: Using forced destination " << forcedDestinationId << " for node " << nodeId << endl;
+            std::cout << "DEBUG: Using forced destination " << forcedDestinationId << " for node " << nodeId << std::endl;
         } else {
             if (numberOfDestinationsPerNode == 0 )
                 numberOfDestinationsPerNode = numberOfNodes-1;
@@ -2142,6 +2777,9 @@ void LoRaNodeApp::generateDataPackets() {
                 dataPacket->setByteLength(dataPacketSize);
                 dataPacket->setDepartureTime(simTime());
 
+                EV << "DEBUG: Created packet from " << nodeId << " to " << destinations[j] << " (seq=" << dataPacket->getDataInt() << ")" << endl;
+                std::cout << "DEBUG: Created packet from " << nodeId << " to " << destinations[j] << " (seq=" << dataPacket->getDataInt() << ")" << std::endl;
+
                 switch (routingMetric) {
     //            case 0:
     //                dataPacket->setTtl(1);
@@ -2152,9 +2790,14 @@ void LoRaNodeApp::generateDataPackets() {
                 }
 
                 LoRaPacketsToSend.push_back(*dataPacket);
+                EV << "DEBUG: Added packet to send queue, queue size now: " << LoRaPacketsToSend.size() << endl;
+                std::cout << "DEBUG: Added packet to send queue, queue size now: " << LoRaPacketsToSend.size() << std::endl;
                 delete dataPacket;
             }
         }
+    } else {
+        EV << "DEBUG: Packet generation condition NOT met for node " << nodeId << " (onlyNode0SendsPackets=" << onlyNode0SendsPackets << ", originalIndex=" << originalNodeIndex << ")" << endl;
+        std::cout << "DEBUG: Packet generation condition NOT met for node " << nodeId << " (onlyNode0SendsPackets=" << onlyNode0SendsPackets << ", originalIndex=" << originalNodeIndex << ")" << std::endl;
     }
 }
 
@@ -2363,7 +3006,54 @@ int LoRaNodeApp::getBestRouteIndexTo(int destination) {
     return -1;
 }
 
+// ---------------------------------------------------------------
+// Helper: Remove any routing entries that do NOT correspond to end
+// nodes. End nodes have been offset to IDs >= 1000. We optionally
+// detect an upper bound if parameter 'numberOfEndNodes' exists.
+// ---------------------------------------------------------------
+void LoRaNodeApp::filterRoutesToEndNodes() {
+    // Skip if already frozen AND table only contains end nodes (fast path)
+    bool allEnd = true;
+    for (const auto &r : singleMetricRoutingTable) {
+        if (r.id < 1000) { allEnd = false; break; }
+    }
+    if (allEnd && routingFrozen) return;
+
+    int endCount = -1;
+    if (hasPar("numberOfEndNodes")) {
+        try { endCount = par("numberOfEndNodes"); } catch (...) { endCount = -1; }
+    }
+    int endMin = 1000;
+    int endMax = (endCount > 0) ? (endMin + endCount - 1) : INT_MAX;
+
+    // Single metric filtering
+    if (!singleMetricRoutingTable.empty()) {
+        std::vector<singleMetricRoute> filtered;
+        filtered.reserve(singleMetricRoutingTable.size());
+        for (const auto &r : singleMetricRoutingTable) {
+            if (r.id >= endMin && r.id <= endMax) {
+                filtered.push_back(r);
+            }
+        }
+        singleMetricRoutingTable.swap(filtered);
+    }
+
+    // Dual metric filtering
+    if (!dualMetricRoutingTable.empty()) {
+        std::vector<dualMetricRoute> filtered2;
+        filtered2.reserve(dualMetricRoutingTable.size());
+        for (const auto &r : dualMetricRoutingTable) {
+            if (r.id >= endMin && r.id <= endMax) {
+                filtered2.push_back(r);
+            }
+        }
+        dualMetricRoutingTable.swap(filtered2);
+    }
+}
+
 void LoRaNodeApp::sanitizeRoutingTable() {
+    // When frozen, keep tables intact
+    if (routingFrozen) return;
     bool routeDeleted = false;
 
     if (singleMetricRoutingTable.size() > 0) {
@@ -2508,6 +3198,13 @@ void LoRaNodeApp::performFailure() {
 
 void LoRaNodeApp::exportRoutingTables() {
     // Ensure directory exists (reuse logic similar to openRoutingCsv)
+#if 0
+    // Legacy unconditional export removed; now guarded at call site and here we provide
+    // an internal guard as a safety net. (Disabled block retained for reference.)
+#endif
+    if (!(hasPar("exportDetailedRoutingTables") && par("exportDetailedRoutingTables").boolValue())) {
+        return; // Skip generating extra routing table artifacts
+    }
 #ifdef _WIN32
     const char sep = '\\';
 #else
@@ -2573,6 +3270,13 @@ int LoRaNodeApp::globalFailureSubsetCountParam = -1;
 double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
 double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
 int LoRaNodeApp::globalTotalNodesObserved = 0;
+
+// -------- Global routing convergence static members --------
+int LoRaNodeApp::globalNodesExpectingConvergence = 0;
+int LoRaNodeApp::globalNodesConverged = 0;
+bool LoRaNodeApp::globalConvergedFired = false;
+std::string LoRaNodeApp::globalConvergenceCsvPath = std::string();
+bool LoRaNodeApp::globalConvergenceCsvReady = false;
 
 void LoRaNodeApp::initGlobalFailureSelection() {
     // Read parameters (each instance sees same values); perform selection once

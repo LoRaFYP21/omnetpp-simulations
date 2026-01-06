@@ -215,6 +215,7 @@ class INET_API LoRaEndNodeApp : public cSimpleModule, public ILifecycle
 
         //Node info
         int nodeId;
+        int originalNodeIndex;  // Original index before ID offset
 
         std::vector<int> neighbourNodes;
         std::vector<int> knownNodes;
