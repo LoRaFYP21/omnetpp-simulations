@@ -89,6 +89,9 @@ simple LoRaNodeApp
         int packetsToForwardMaxVectorSize = default(0);
     // When true, do not send proactive routing beacons; routes are discovered via AODV only
     bool aodvOnly = default(false);
+    // AODV RREQ retry configuration
+    volatile double aodvRreqBackoff @unit(s) = default(30s);
+    int aodvRreqMaxRetries = default(3);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

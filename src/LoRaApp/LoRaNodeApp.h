@@ -20,6 +20,7 @@
 #include <string>
 #include <set>
 #include <map>
+#include <cstdint>
 
 #include "inet/common/lifecycle/ILifecycle.h"
 #include "inet/common/lifecycle/NodeStatus.h"
@@ -79,6 +80,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void handleAodvPacket(cMessage *msg);
     void maybeStartDiscoveryFor(int destination);
     simtime_t sendAodvPacket();
+    void handleAodvRetryTimer(cMessage *msg);
+    void scheduleAodvRetry(int destination);
     // Log when an AODV RREQ reaches its destination (per-destination CSV)
     void logRreqAtDestination(const aodv::Rreq* rreq);
     // Unified RREP hop/path logger
@@ -186,6 +189,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // AODV scheduling
     bool aodvPacketsDue = false;
     simtime_t nextAodvPacketTransmissionTime;
+    // AODV retry backoff and per-destination timers
+    simtime_t aodvRreqBackoff;
+    int aodvRreqMaxRetries;
+    std::map<int,int> aodvRetryCount;           // destinationId -> retries
+    std::map<int,cMessage*> aodvRetryTimers;    // destinationId -> timer message
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;
@@ -265,7 +273,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     std::set<long long> aodvSeenRreqs;            // key = (src<<32) | rreqSeq
     std::set<int> aodvDiscoveryInProgress;        // destinations currently discovering
     std::map<int, std::vector<LoRaAppPacket>> aodvBufferedData; // dest -> buffered DATA frames
-    int aodvRreqSeq = 0;
+    // AODV sequence state
+    // aodvSeq: this node's own sequence number (increments before originating RREQ, and before sending RREP when destination)
+    // aodvRreqId: monotonically increasing ID for broadcast RREQs from this node (used only for duplicate suppression)
+    int aodvSeq = 0;
+    int aodvRreqId = 0;
     // Reverse path mapping: first-seen parent per origin; and last seen bcastId per origin
     std::map<int,int> aodvReverseParent;          // srcId -> parent (first RREQ hop)
     std::map<int,int> aodvReverseBcastId;         // srcId -> last seen bcastId
@@ -307,6 +319,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 double metric;
                 int window[33];
                 simtime_t valid;
+            // Destination sequence tracking for this route's destination (id)
+            int dstSeq;           // last known destination sequence number
+            bool dstSeqValid;     // whether dstSeq is valid
+                int hopCount;         // hops to destination (if known)
         };
         std::vector<singleMetricRoute> singleMetricRoutingTable;
 
@@ -320,6 +336,10 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 int window[33];
                 int sf;
                 simtime_t valid;
+            // Destination sequence tracking for this route's destination (id)
+            int dstSeq;
+            bool dstSeqValid;
+                int hopCount;
         };
         std::vector<dualMetricRoute> dualMetricRoutingTable;
 
@@ -353,6 +373,9 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         bool loRaUseHeader;
         bool loRaCAD;
         double loRaCADatt;
+
+        // Logs a CSV snapshot of the current singleMetricRoutingTable with AODV fields
+        void logRoutingTableSnapshot(const char* eventType);
 
 };
 

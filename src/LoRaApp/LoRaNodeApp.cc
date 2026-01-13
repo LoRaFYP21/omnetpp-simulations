@@ -14,6 +14,7 @@
 //
 #include <iostream>
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 #ifdef _WIN32
 #include <direct.h>
@@ -249,6 +250,10 @@ void LoRaNodeApp::initialize(int stage) {
         getRoutesFromDataPackets = par("getRoutesFromDataPackets");
         packetTTL = par("packetTTL");
         stopRoutingAfterDataDone = par("stopRoutingAfterDataDone");
+
+        // AODV retry configuration
+        aodvRreqBackoff = par("aodvRreqBackoff");
+        aodvRreqMaxRetries = par("aodvRreqMaxRetries");
 
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
@@ -665,6 +670,12 @@ void LoRaNodeApp::finish() {
 void LoRaNodeApp::handleMessage(cMessage *msg) {
 
     if (msg->isSelfMessage()) {
+        // Dedicated AODV retry timers use a name prefix
+        const char* n = msg->getName();
+        if (n && strncmp(n, "AODV_RETRY_", 11) == 0) {
+            handleAodvRetryTimer(msg);
+            return;
+        }
         handleSelfMessage(msg);
     } else {
         handleMessageFromLowerLayer(msg);
@@ -988,6 +999,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                         newNeighbour.id = packet->getSource();
                         newNeighbour.via = packet->getSource();
                         newNeighbour.valid = simTime() + routeTimeout;
+                        newNeighbour.dstSeq = 0; newNeighbour.dstSeqValid = false;
                         switch (routingMetric) {
                             case HOP_COUNT_SINGLE_SF:
                                 newNeighbour.metric = 1;
@@ -1111,6 +1123,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                     newNeighbour.priMetric = pow(2, packet->getOptions().getLoRaSF() - 7);
                     newNeighbour.secMetric = 1;
                     newNeighbour.valid = simTime() + routeTimeout;
+                    newNeighbour.dstSeq = 0; newNeighbour.dstSeqValid = false;
                     dualMetricRoutingTable.push_back(newNeighbour);
                 }
 
@@ -1160,6 +1173,7 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                     newNeighbour.priMetric = pow(2, packet->getOptions().getLoRaSF() - 7);
                     newNeighbour.secMetric = packet->getOptions().getLoRaSF() - 7;
                     newNeighbour.valid = simTime() + routeTimeout;
+                    newNeighbour.dstSeq = 0; newNeighbour.dstSeqValid = false;
                     dualMetricRoutingTable.push_back(newNeighbour);
                 }
 
@@ -1643,6 +1657,14 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 }
 
 // AODV: wrapper that dispatches RREQ/RREP
+// Helpers for AODV destination sequence comparison (handle wrap if needed)
+static inline bool seqNewer(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) > 0; // true if a is newer than b
+}
+static inline bool seqOlder(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) < 0; // true if a is older than b
+}
+
 void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
     // envelope contains AODV inner packet (aodv::Rreq or aodv::Rrep)
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
@@ -1667,10 +1689,26 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         int idx = getRouteIndexInSingleMetricRoutingTable(src, via);
         if (idx < 0) {
             singleMetricRoute nr; nr.id = src; nr.via = via; nr.metric = 1; nr.valid = simTime() + routeTimeout;
+            nr.dstSeq = rreq->getSrcSeq(); nr.dstSeqValid = true; // reverse route stores origin's seq
+            nr.hopCount = rreq->getHopCount();
             singleMetricRoutingTable.push_back(nr);
         } else {
-            singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+            // Discard rule: do not update with older seq
+            if (!singleMetricRoutingTable[idx].dstSeqValid || seqNewer((uint32_t)rreq->getSrcSeq(), (uint32_t)singleMetricRoutingTable[idx].dstSeq)) {
+                singleMetricRoutingTable[idx].via = via;
+                singleMetricRoutingTable[idx].dstSeq = rreq->getSrcSeq();
+                singleMetricRoutingTable[idx].dstSeqValid = true;
+                singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+                singleMetricRoutingTable[idx].hopCount = rreq->getHopCount();
+            } else if (rreq->getSrcSeq() == singleMetricRoutingTable[idx].dstSeq) {
+                // equal seq: refresh lifetime only
+                singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+            } else {
+                // older: ignore update (no table change)
+            }
         }
+        // Log snapshot after reverse route update
+        logRoutingTableSnapshot("aodv_rreq_processed");
 
         // Track first-seen parent per-origin for this discovery wave
         auto bIt = aodvReverseBcastId.find(src);
@@ -1695,7 +1733,9 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             aodv::Rrep *innerRrep = new aodv::Rrep("RREP");
             innerRrep->setSrcId(src);           // originator
             innerRrep->setDstId(nodeId);        // destination (me)
-            innerRrep->setDstSeq(0);
+            // Per AODV: before sending RREP, ensure own seq >= requested dstSeq
+            if (rreq->getDstSeq() > aodvSeq) aodvSeq = rreq->getDstSeq();
+            innerRrep->setDstSeq(aodvSeq);
             innerRrep->setHopCount(0);
             innerRrep->setLifetime(routeTimeout.dbl());
             innerRrep->setByteLength(12);
@@ -1751,20 +1791,43 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
     int rps = rrep->getPathArraySize();
     rrep->setPathArraySize(rps+1);
     rrep->setPath(rps, nodeId);
-    // Install/refresh forward route to destination (RREP source) via last hop
+    // Install/refresh forward route to destination (RREP destination) via last hop
         int dest = rrep->getDstId(); // final destination of the path
     int via = packet->getLastHop();
         int idx = getRouteIndexInSingleMetricRoutingTable(dest, via);
         if (idx < 0) {
             singleMetricRoute nr; nr.id = dest; nr.via = via; nr.metric = 1; nr.valid = simTime() + routeTimeout;
+            nr.dstSeq = rrep->getDstSeq(); nr.dstSeqValid = true;
+            nr.hopCount = rrep->getHopCount();
             singleMetricRoutingTable.push_back(nr);
         } else {
-            singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+            if (!singleMetricRoutingTable[idx].dstSeqValid || seqNewer((uint32_t)rrep->getDstSeq(), (uint32_t)singleMetricRoutingTable[idx].dstSeq)) {
+                singleMetricRoutingTable[idx].via = via;
+                singleMetricRoutingTable[idx].dstSeq = rrep->getDstSeq();
+                singleMetricRoutingTable[idx].dstSeqValid = true;
+                singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+                singleMetricRoutingTable[idx].hopCount = rrep->getHopCount();
+            } else if (rrep->getDstSeq() == singleMetricRoutingTable[idx].dstSeq) {
+                singleMetricRoutingTable[idx].valid = simTime() + routeTimeout;
+            } else {
+                // older seq: ignore
+            }
         }
+        // Log snapshot after forward route update
+        logRoutingTableSnapshot("aodv_rrep_processed");
 
         if (packet->getDestination() == nodeId) {
             // RREP reached original source: flush buffered data
             logRrepFinalPath(rrep);
+            // Cancel any pending retry timer and clear discovery state for this destination
+            auto tmIt = aodvRetryTimers.find(dest);
+            if (tmIt != aodvRetryTimers.end()) {
+                if (tmIt->second && tmIt->second->isScheduled()) cancelEvent(tmIt->second);
+                delete tmIt->second;
+                aodvRetryTimers.erase(tmIt);
+            }
+            aodvRetryCount.erase(dest);
+            aodvDiscoveryInProgress.erase(dest);
             auto it = aodvBufferedData.find(dest);
             if (it != aodvBufferedData.end()) {
                 // Lock the first-hop next hop toward destination based on the reverse route just installed
@@ -1935,18 +1998,116 @@ void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDs
     }
 }
 
+void LoRaNodeApp::scheduleAodvRetry(int destination) {
+    // Cancel and delete any existing timer for this destination
+    auto it = aodvRetryTimers.find(destination);
+    if (it != aodvRetryTimers.end()) {
+        if (it->second && it->second->isScheduled()) cancelEvent(it->second);
+        delete it->second;
+        aodvRetryTimers.erase(it);
+    }
+    // Create and schedule a new timer message
+    char name[64];
+    sprintf(name, "AODV_RETRY_%d", destination);
+    cMessage *m = new cMessage(name);
+    aodvRetryTimers[destination] = m;
+    scheduleAt(simTime() + aodvRreqBackoff, m);
+}
+
+void LoRaNodeApp::handleAodvRetryTimer(cMessage *msg) {
+    // Extract destination from the message name suffix
+    int destination = -1;
+    const char* n = msg->getName();
+    if (n && strlen(n) > 11) {
+        destination = atoi(n + 11);
+    }
+    // Remove from timers and delete message
+    for (auto it = aodvRetryTimers.begin(); it != aodvRetryTimers.end(); ++it) {
+        if (it->second == msg) {
+            aodvRetryTimers.erase(it);
+            break;
+        }
+    }
+    delete msg;
+
+    if (destination < 0) return;
+
+    // If discovery completed or next hop locked, stop
+    if (!aodvDiscoveryInProgress.count(destination) || aodvLockedNextHop.count(destination)) {
+        aodvDiscoveryInProgress.erase(destination);
+        aodvRetryCount.erase(destination);
+        return;
+    }
+
+    // Retry if under max retries
+    int count = 0;
+    if (aodvRetryCount.count(destination)) count = aodvRetryCount[destination];
+    if (count >= aodvRreqMaxRetries) {
+        aodvDiscoveryInProgress.erase(destination);
+        aodvRetryCount.erase(destination);
+        return;
+    }
+    aodvRetryCount[destination] = count + 1;
+
+    // Build a new RREQ
+    aodv::Rreq *innerRreq = new aodv::Rreq("RREQ");
+    // Per AODV: increment own seq before originating discovery
+    innerRreq->setSrcId(nodeId);
+    innerRreq->setDstId(destination);
+    innerRreq->setSrcSeq(++aodvSeq);
+    // Set requested destination seq if known
+    {
+        int reqSeq = 0; bool known = false;
+        // find any route entry to destination with a known dstSeq
+        for (auto &r : singleMetricRoutingTable) {
+            if (r.id == destination && r.dstSeqValid) { reqSeq = r.dstSeq; known = true; break; }
+        }
+        innerRreq->setDstSeq(known ? reqSeq : 0);
+    }
+    innerRreq->setHopCount(0);
+    innerRreq->setBcastId(++aodvRreqId);
+    innerRreq->setTtl(packetTTL);
+    innerRreq->setByteLength(12);
+    innerRreq->setPathArraySize(1);
+    innerRreq->setPath(0, nodeId);
+
+    LoRaAppPacket rreqEnv("AODV-RREQ");
+    rreqEnv.setMsgType(ROUTING);
+    rreqEnv.setSource(nodeId);
+    rreqEnv.setDestination(BROADCAST_ADDRESS);
+    rreqEnv.setVia(BROADCAST_ADDRESS);
+    rreqEnv.setLastHop(nodeId);
+    rreqEnv.setTtl(packetTTL);
+    rreqEnv.encapsulate(innerRreq);
+
+    aodvPacketsToSend.push_back(rreqEnv);
+    aodvPacketsDue = true;
+    nextAodvPacketTransmissionTime = simTime();
+    scheduleSelfAt(simTime());
+
+    // Schedule next retry
+    scheduleAodvRetry(destination);
+}
+
 void LoRaNodeApp::maybeStartDiscoveryFor(int destination) {
     if (aodvDiscoveryInProgress.count(destination)) return;
     aodvDiscoveryInProgress.insert(destination);
+    aodvRetryCount[destination] = 0;
 
     // Build inner AODV RREQ
     aodv::Rreq *innerRreq = new aodv::Rreq("RREQ");
     innerRreq->setSrcId(nodeId);
     innerRreq->setDstId(destination);
-    innerRreq->setSrcSeq(++aodvRreqSeq);
-    innerRreq->setDstSeq(0);
+    innerRreq->setSrcSeq(++aodvSeq);
+    {
+        int reqSeq = 0; bool known = false;
+        for (auto &r : singleMetricRoutingTable) {
+            if (r.id == destination && r.dstSeqValid) { reqSeq = r.dstSeq; known = true; break; }
+        }
+        innerRreq->setDstSeq(known ? reqSeq : 0);
+    }
     innerRreq->setHopCount(0);
-    innerRreq->setBcastId(aodvRreqSeq);
+    innerRreq->setBcastId(++aodvRreqId);
     innerRreq->setTtl(packetTTL);
     innerRreq->setByteLength(12);
     // Seed path with originator
@@ -1966,6 +2127,9 @@ void LoRaNodeApp::maybeStartDiscoveryFor(int destination) {
     aodvPacketsToSend.push_back(rreqEnv);
     aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
     scheduleSelfAt(simTime());
+
+    // Schedule first retry timer
+    scheduleAodvRetry(destination);
 }
 
 simtime_t LoRaNodeApp::sendForwardPacket() {
@@ -2470,18 +2634,41 @@ int LoRaNodeApp::getBestRouteIndexTo(int destination) {
         }
 
         if (availableRoutes.size() > 0) {
-            int bestRoute = 0;
-            int bestMetric = availableRoutes[0].metric;
-
+            // Prefer freshest destination sequence if available
             int availableRoutesCount = end(availableRoutes) - begin(availableRoutes);
+            bool anySeq = false;
+            int bestRoute = 0;
+            int bestSeq = 0;
+            for (int j = 0; j < availableRoutesCount; j++) {
+                if (availableRoutes[j].dstSeqValid) {
+                    if (!anySeq || seqNewer((uint32_t)availableRoutes[j].dstSeq, (uint32_t)bestSeq)) {
+                        anySeq = true;
+                        bestSeq = availableRoutes[j].dstSeq;
+                        bestRoute = j;
+                    }
+                }
+            }
+            if (anySeq) {
+                // Among equal-best seq, choose best metric then latest validity
+                for (int j = 0; j < availableRoutesCount; j++) {
+                    if (availableRoutes[j].dstSeqValid && availableRoutes[j].dstSeq == bestSeq) {
+                        if (availableRoutes[j].metric < availableRoutes[bestRoute].metric ||
+                            (availableRoutes[j].metric == availableRoutes[bestRoute].metric && availableRoutes[j].valid > availableRoutes[bestRoute].valid)) {
+                            bestRoute = j;
+                        }
+                    }
+                }
+                return getRouteIndexInSingleMetricRoutingTable(availableRoutes[bestRoute].id, availableRoutes[bestRoute].via);
+            }
+            // No seq info: fall back to original metric-based selection
+            bestRoute = 0;
+            int bestMetric = availableRoutes[0].metric;
             for (int j = 0; j < availableRoutesCount; j++) {
                 if (availableRoutes[j].metric < bestMetric) {
                     bestMetric = availableRoutes[j].metric;
                 }
             }
-
             simtime_t lastMetric = 0;
-
             for (int k = 0; k < availableRoutesCount; k++) {
                 if (availableRoutes[k].metric == bestMetric) {
                     if (availableRoutes[k].valid >= lastMetric) {
@@ -2632,6 +2819,46 @@ void LoRaNodeApp::ensurePathsDir() {
     if (stat("results", &st) != 0) { mkdir("results", 0755); }
     if (stat("results/paths", &st) != 0) { mkdir("results/paths", 0755); }
 #endif
+}
+
+// Ensure routing_tables directory exists for routing table CSVs (relative to current working dir)
+static void ensureRoutingTablesDir() {
+#ifdef _WIN32
+    _mkdir("routing_tables");
+#else
+    struct stat st{};
+    if (stat("routing_tables", &st) != 0) { mkdir("routing_tables", 0755); }
+#endif
+}
+
+// Log a snapshot of the current routing table (AODV-aware fields)
+void LoRaNodeApp::logRoutingTableSnapshot(const char* eventType) {
+    try {
+        ensureRoutingTablesDir();
+        char path[256];
+        sprintf(path, "routing_tables/node_%d_routing.csv", nodeId);
+        bool writeHeader = false;
+        {
+            std::ifstream check(path);
+            writeHeader = !check.good();
+        }
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open()) return;
+        if (writeHeader) {
+            out << "simTime,event,nodeId,tableSize,id,dstSeq,dstSeqValid,netIf,hopCount,nextHop,validUntil" << std::endl;
+        }
+        int tableSize = (int)singleMetricRoutingTable.size();
+        for (const auto &r : singleMetricRoutingTable) {
+            out << simTime() << "," << eventType << "," << nodeId << "," << tableSize << "," << r.id << ",";
+            if (r.dstSeqValid) out << r.dstSeq << ",valid"; else out << ",invalid";
+            out << ",LoRa"; // network interface
+            out << "," << r.hopCount;
+            out << "," << r.via;
+            out << "," << r.valid;
+            out << std::endl;
+        }
+        out.close();
+    } catch (...) {}
 }
 
 // Log final path of delivered DATA packets (only at final destination)
