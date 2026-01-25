@@ -11,7 +11,7 @@ import inet.mobility.single.CircleMobility; // fallback simple mobility
 import inet.mobility.single.MassMobility; // fallback simple mobility
 import inet.networklayer.common.InterfaceTable;
 import loranetwork.LoRa.LoRaNic;
-import loranetwork.LoRaApp.LoRaEndRescueNodeApp;
+import loranetwork.LoRaApp.LoRaNodeApp; // Use generic node app like LoRaNode
 
 module endRescueNode
 {
@@ -25,7 +25,13 @@ module endRescueNode
         double sepY @unit(m) = default(1000m);
         double initialX @unit(m) = default(0m);
         double initialY @unit(m) = default(0m);
+        // Match LoRaNode parameters used by LoRaNodeApp for circle deployment (unitless like LoRaNode)
+        double rad = default(320.0);
+        double centX = default(320.0);
+        double centY = default(320.0);
         bool iAmEnd = default(true); // Added so LoRaEndRescueNodeApp can query host->par("iAmEnd")
+        // New: explicit rescue classification so LoRaNodeApp can offset IDs to 2000+
+        bool iAmRescue = default(false);
         int cols = default(10);
         double maxGatewayDistance = default(320.0);
         double gatewayX = default(320.0);
@@ -49,8 +55,8 @@ module endRescueNode
         LoRaNic: LoRaNic {
             @display("p=137,239");
         }
-        // Use the expected submodule name 'LoRaNodeApp' so lower layers can locate it
-        LoRaNodeApp: LoRaEndRescueNodeApp {
+        // Use the generic LoRaNodeApp so behavior matches LoRaNode (iAmEnd=true gates end-node rules)
+        LoRaNodeApp: LoRaNodeApp {
             @display("p=137,32");
         }
     connections allowunconnected:

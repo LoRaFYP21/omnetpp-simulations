@@ -64,13 +64,31 @@ Define_Module (LoRaNodeApp);
 // patch clarifies correct mapping where 3 = HOP_COUNT and 6 = ETX.
 // ---------------------------------------------------------------------------
 
-// Helper: identify if this app instance belongs to an end node (host parameter iAmEnd=true)
+// Helper: identify if this app instance should behave like an end node.
+// Rescue end nodes rely on iAmRescue; regular end nodes rely on iAmEnd.
 static inline bool isEndNodeHost(cSimpleModule* self) {
     cModule *hostMod = getContainingNode(self);
     if (!hostMod) return false;
-    if (!hostMod->hasPar("iAmEnd")) return false;
     try {
-        return (bool)hostMod->par("iAmEnd");
+        // Rescue nodes act as end nodes without needing iAmEnd
+        if (hostMod->hasPar("iAmRescue") && (bool)hostMod->par("iAmRescue"))
+            return true;
+        // Regular end nodes
+        if (hostMod->hasPar("iAmEnd") && (bool)hostMod->par("iAmEnd"))
+            return true;
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
+
+// Helper: identify if this app instance belongs to a rescue node (host parameter iAmRescue=true)
+static inline bool isRescueNodeHost(cSimpleModule* self) {
+    cModule *hostMod = getContainingNode(self);
+    if (!hostMod) return false;
+    if (!hostMod->hasPar("iAmRescue")) return false;
+    try {
+        return (bool)hostMod->par("iAmRescue");
     } catch (...) {
         return false;
     }
@@ -99,13 +117,18 @@ void LoRaNodeApp::initialize(int stage) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
         originalNodeIndex = nodeId;  // Store original index before offset
-        // If this node is an end node and participates in routing (routingMetric != 0),
-        // offset its ID to 1000+ to avoid collisions with relay IDs.
+        // Offset node ID based on host role:
+        // - Rescue nodes: +2000 (preferred when iAmRescue is true)
+        // - End nodes (non-rescue) participating in routing: +1000
         {
             cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
             bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = (bool)hostMod->par("iAmRescue");
+            }
             if (hostMod && hostMod->hasPar("iAmEnd")) {
-                isEnd = hostMod->par("iAmEnd");
+                isEnd = (bool)hostMod->par("iAmEnd");
             } else {
                 // Fallback: try detecting by vector base name
                 cModule *parent = getParentModule();
@@ -114,7 +137,9 @@ void LoRaNodeApp::initialize(int stage) {
                     if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
                 }
             }
-            if (isEnd && routingMetric != 0) {
+            if (isRescue) {
+                nodeId += 2000;
+            } else if (isEnd && routingMetric != 0) {
                 nodeId += 1000;
             }
         }
@@ -492,11 +517,15 @@ void LoRaNodeApp::initialize(int stage) {
     // Note: prepare CSV paths after nodeId is known (set further down)
 
 
-        //Node identifier (re-assign and apply end-node offset when participating in routing)
+        //Node identifier (re-assign and apply rescue/end offset consistently)
             nodeId = getContainingNode(this)->getIndex();
         {
             cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
             bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = hostMod->par("iAmRescue").boolValue();
+            }
             if (hostMod && hostMod->hasPar("iAmEnd")) {
                 isEnd = hostMod->par("iAmEnd").boolValue();
             } else {
@@ -506,7 +535,9 @@ void LoRaNodeApp::initialize(int stage) {
                     if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
                 }
             }
-            if (isEnd && routingMetric != 0) {
+            if (isRescue) {
+                nodeId += 2000;
+            } else if (isEnd && routingMetric != 0) {
                 nodeId += 1000;
             }
         }
@@ -718,8 +749,10 @@ void LoRaNodeApp::initialize(int stage) {
 
 std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
     double radius, double centX, double centY) {
-    nodeId = getContainingNode(this)->getIndex();
+    // Recompute effective node id with rescue/end offsets for any path that recalculates it
+    int baseId = getContainingNode(this)->getIndex();
     routingMetric = par("routingMetric");
+    nodeId = baseId + (isRescueNodeHost(this) ? 2000 : ((isEndNodeHost(this) && routingMetric != 0) ? 1000 : 0));
 
     if (nodeId == 0 && routingMetric == 0) // only for the end nodes and the packet originator
     {
