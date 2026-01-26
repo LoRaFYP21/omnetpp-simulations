@@ -2559,34 +2559,41 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
             // Ensure we advertise only end-node routes (strip others first)
             filterRoutesToEndNodes();
 
-            // Build a unique set of destination IDs from the current routing table,
-            // so we can advertise ALL known destinations (including end-node IDs like 1000/1001),
-            // not only the relay index range [0..numberOfNodes-1].
+            // Build a unique set of destination IDs from the current routing table
+            // and ALWAYS include a self-route (id=nodeId, metric=0) so neighbors learn routes to us.
             {
                 std::set<int> destIds;
+                destIds.insert(nodeId); // self
                 for (const auto &r : singleMetricRoutingTable) {
                     if (r.id != nodeId)
                         destIds.insert(r.id);
                 }
 
-                // Count the number of best routes among known destinations
+                // Count routable destinations: self + best known routes
+                numberOfRoutes = 0;
                 for (int did : destIds) {
-                    if (getBestRouteIndexTo(did) >= 0)
+                    if (did == nodeId) {
                         numberOfRoutes++;
+                    } else if (getBestRouteIndexTo(did) >= 0) {
+                        numberOfRoutes++;
+                    }
                 }
 
-                // Make room for numberOfRoutes routes
                 routingPacket->setRoutingTableArraySize(numberOfRoutes);
-
-                // Add the best route for each known destination
+                int idx = 0;
                 for (int did : destIds) {
-                    int bestIdx = getBestRouteIndexTo(did);
-                    if (bestIdx >= 0) {
-                        LoRaRoute thisLoRaRoute;
-                        thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
-                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
-                        routingPacket->setRoutingTable(numberOfRoutes - 1, thisLoRaRoute);
-                        numberOfRoutes--;
+                    LoRaRoute thisLoRaRoute;
+                    if (did == nodeId) {
+                        thisLoRaRoute.setId(nodeId);
+                        thisLoRaRoute.setPriMetric(0);
+                        routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                    } else {
+                        int bestIdx = getBestRouteIndexTo(did);
+                        if (bestIdx >= 0) {
+                            thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
+                            thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
+                            routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                        }
                     }
                 }
             }
@@ -3052,19 +3059,20 @@ void LoRaNodeApp::filterRoutesToEndNodes() {
     }
     if (allEnd && routingFrozen) return;
 
-    int endCount = -1;
-    if (hasPar("numberOfEndNodes")) {
-        try { endCount = par("numberOfEndNodes"); } catch (...) { endCount = -1; }
-    }
+    // Accept all destination IDs mapped to end-like nodes:
+    // - Classic end nodes: 1000 .. (1000 + numberOfEndNodes - 1)
+    // - Rescue end nodes: 2000 .. (2000 + numberOfRescueNodes - 1)
+    // LoRaNodeApp does not declare numberOfRescueNodes; to avoid
+    // excluding rescues, keep any id >= 1000. This includes both
+    // classic end nodes (1000+) and rescue nodes (2000+).
     int endMin = 1000;
-    int endMax = (endCount > 0) ? (endMin + endCount - 1) : INT_MAX;
 
     // Single metric filtering
     if (!singleMetricRoutingTable.empty()) {
         std::vector<singleMetricRoute> filtered;
         filtered.reserve(singleMetricRoutingTable.size());
         for (const auto &r : singleMetricRoutingTable) {
-            if (r.id >= endMin && r.id <= endMax) {
+            if (r.id >= endMin) {
                 filtered.push_back(r);
             }
         }
@@ -3076,7 +3084,7 @@ void LoRaNodeApp::filterRoutesToEndNodes() {
         std::vector<dualMetricRoute> filtered2;
         filtered2.reserve(dualMetricRoutingTable.size());
         for (const auto &r : dualMetricRoutingTable) {
-            if (r.id >= endMin && r.id <= endMax) {
+            if (r.id >= endMin) {
                 filtered2.push_back(r);
             }
         }

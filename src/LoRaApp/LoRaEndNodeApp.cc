@@ -272,6 +272,29 @@ void LoRaEndNodeApp::initialize(int stage) {
 
         //Node identifier
         nodeId = getContainingNode(this)->getIndex();
+        // Apply consistent ID offsets for end/rescue semantics to align with LoRaNodeApp
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = hostMod->par("iAmRescue").boolValue();
+            }
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd").boolValue();
+            } else {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isRescue) {
+                nodeId += 2000;
+            } else if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -1615,28 +1638,43 @@ simtime_t LoRaEndNodeApp::sendRoutingPacket() {
 
             transmit = true;
 
-            // Count the number of best routes
-            for (int i=0; i<numberOfEndNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
+            // Advertise routes using actual destination IDs present in the table,
+            // and ALWAYS include a self-route (id = nodeId, metric = 0).
+            {
+                std::set<int> destIds;
+                // Include self as a destination so neighbors learn a route to this end node (e.g., 1000)
+                destIds.insert(nodeId);
+                for (const auto &r : singleMetricRoutingTable) {
+                    if (r.id != nodeId) destIds.insert(r.id);
+                }
+
+                // Count routable destinations: self (always) + best known routes
+                numberOfRoutes = 0;
+                for (int did : destIds) {
+                    if (did == nodeId) {
+                        numberOfRoutes++;
+                    } else if (getBestRouteIndexTo(did) >= 0) {
                         numberOfRoutes++;
                     }
                 }
-            }
 
-            // Make room for numberOfRoutes routes
-            routingPacket->setRoutingTableArraySize(numberOfRoutes);
-
-            // Add the best route to each node
-            for (int i=0; i<numberOfEndNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
-
-                        LoRaRoute thisLoRaRoute;
-                        thisLoRaRoute.setId(singleMetricRoutingTable[getBestRouteIndexTo(i)].id);
-                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[getBestRouteIndexTo(i)].metric);
-                        routingPacket->setRoutingTable(numberOfRoutes-1, thisLoRaRoute);
-                        numberOfRoutes--;
+                // Allocate and populate routing table entries
+                routingPacket->setRoutingTableArraySize(numberOfRoutes);
+                int idx = 0;
+                for (int did : destIds) {
+                    LoRaRoute thisLoRaRoute;
+                    if (did == nodeId) {
+                        // Self route with zero metric
+                        thisLoRaRoute.setId(nodeId);
+                        thisLoRaRoute.setPriMetric(0);
+                        routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                    } else {
+                        int bestIdx = getBestRouteIndexTo(did);
+                        if (bestIdx >= 0) {
+                            thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
+                            thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
+                            routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                        }
                     }
                 }
             }
