@@ -68,11 +68,11 @@ module endRescueNode
         }
         // Use the generic LoRaNodeApp so behavior matches LoRaNode (iAmEnd=true gates end-node rules)
         LoRaNodeApp: LoRaNodeApp {
-            routingProtocol = default(parent.routingProtocol);
-            dsdvIncrementalPeriod = default(parent.dsdvIncrementalPeriod);
-            dsdvFullUpdatePeriod = default(parent.dsdvFullUpdatePeriod);
-            dsdvTimerJitterMin = default(parent.dsdvTimerJitterMin);
-            dsdvTimerJitterMax = default(parent.dsdvTimerJitterMax);
+            routingProtocol = routingProtocol;
+            dsdvIncrementalPeriod = dsdvIncrementalPeriod;
+            dsdvFullUpdatePeriod = dsdvFullUpdatePeriod;
+            dsdvTimerJitterMin = dsdvTimerJitterMin;
+            dsdvTimerJitterMax = dsdvTimerJitterMax;
             @display("p=137,32");
         }
     connections allowunconnected:

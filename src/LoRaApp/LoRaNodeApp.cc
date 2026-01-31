@@ -513,7 +513,9 @@ void LoRaNodeApp::initialize(int stage) {
             dsdvIncrementalTimer = new cMessage("dsdvIncrementalTimer");
             dsdvFullTimer = new cMessage("dsdvFullTimer");
 
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " scheduling dsdvIncrementalTimer for t=" << nextIncrementalUpdate << endl;
             scheduleAt(nextIncrementalUpdate, dsdvIncrementalTimer);
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " scheduling dsdvFullTimer for t=" << nextFullUpdate << endl;
             scheduleAt(nextFullUpdate, dsdvFullTimer);
 
             EV_INFO << "[DSDV] Initialized DSDV routing protocol for node " << nodeId << endl;
@@ -785,6 +787,7 @@ void LoRaNodeApp::initialize(int stage) {
 
 
         selfPacket = new cMessage("selfPacket");
+        selfPacket->setSchedulingPriority(-10);  // High priority: processed before mobility events (default priority is 0)
         EV_INFO << "selfPacket vinuja" <<endl;
         // Failure scheduling parameters (local + optional global subset override)
         timeToFailureParam = par("timeToFailure");
@@ -1066,6 +1069,12 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
 
 void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
+    // DEBUG: Log all self-messages for node 2000
+    if (nodeId == 2000) {
+        EV_WARN << "[DEBUG-TIMER] Node 2000 received self-message: " << msg->getName() 
+                << " at t=" << simTime() << " (failed=" << failed << ")" << endl;
+    }
+
     // If this is the failure event, perform failure and stop any further actions
     if (msg == failureEvent) {
         performFailure();
@@ -1079,6 +1088,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     // Handle DSDV timer messages (set flags for coordinated packet scheduling)
     if (useDSDV) {
         if (msg == dsdvIncrementalTimer) {
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " ENTERING dsdvIncrementalTimer handler at t=" << simTime() << endl;
             EV_INFO << "[DSDV] Incremental update timer fired at " << simTime() << endl;
             
             // Set flag to send incremental update when MAC is ready
@@ -1089,9 +1099,14 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                 EV_INFO << "[DSDV] Scheduled incremental update with " << changedSet.size() << " changed routes" << endl;
                 
                 // Trigger selfPacket to wake up and check for transmission
-                if (!selfPacket->isScheduled()) {
-                    scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
+                // CRITICAL FIX: Cancel and reschedule selfPacket to force delivery
+                EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " checking selfPacket: isScheduled=" << selfPacket->isScheduled() << endl;
+                if (selfPacket->isScheduled()) {
+                    EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " CANCELING stuck selfPacket" << endl;
+                    cancelEvent(selfPacket);
                 }
+                EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " scheduling selfPacket at t=" << (simTime() + 10*simTimeResolution) << endl;
+                scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
             } else {
                 EV_INFO << "[DSDV] No changes to advertise, skipping incremental update" << endl;
             }
@@ -1101,10 +1116,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             simtime_t jitterMin = par("dsdvTimerJitterMin");
             simtime_t jitterMax = par("dsdvTimerJitterMax");
             simtime_t jitter = uniform(jitterMin.dbl(), jitterMax.dbl());
-            scheduleAt(simTime() + period + jitter, dsdvIncrementalTimer);
+            simtime_t nextTime = simTime() + period + jitter;
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " rescheduling dsdvIncrementalTimer for t=" << nextTime << endl;
+            scheduleAt(nextTime, dsdvIncrementalTimer);
             return;
         }
         if (msg == dsdvFullTimer) {
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " ENTERING dsdvFullTimer handler at t=" << simTime() << endl;
             EV_INFO << "[DSDV] Full update timer fired at " << simTime() << endl;
             
             // Set flag to send full-dump update when MAC is ready
@@ -1113,9 +1131,14 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             nextDsdvPacketTransmissionTime = simTime();
             
             // Trigger selfPacket to wake up and check for transmission
-            if (!selfPacket->isScheduled()) {
-                scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
+            // CRITICAL FIX: Cancel and reschedule selfPacket to force delivery
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " (fullTimer) checking selfPacket: isScheduled=" << selfPacket->isScheduled() << endl;
+            if (selfPacket->isScheduled()) {
+                EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " (fullTimer) CANCELING stuck selfPacket" << endl;
+                cancelEvent(selfPacket);
             }
+            EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " (fullTimer) scheduling selfPacket at t=" << (simTime() + 10*simTimeResolution) << endl;
+            scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
             
             // Reschedule with jitter
             simtime_t period = par("dsdvFullUpdatePeriod");
@@ -1135,6 +1158,14 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
     LoRaMac *lrmc = (LoRaMac *)getParentModule()->getSubmodule("LoRaNic")->getSubmodule("mac");
+    
+    // DEBUG: Log selfPacket processing for node 2000
+    if (nodeId == 2000) {
+        EV_WARN << "[DEBUG-SELFPACKET] Node 2000 processing selfPacket at t=" << simTime() 
+                << " MAC state=" << lrmc->fsm.getState() 
+                << " dsdvPacketDue=" << dsdvPacketDue << endl;
+    }
+    
     if (lrmc->fsm.getState() == IDLE ) {
 
         simtime_t txDuration = 0;
@@ -1165,6 +1196,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         // Check if there are DSDV packets to send
         if ( dsdvPacketDue && simTime() >= nextDsdvPacketTransmissionTime ) {
             sendDsdv = true;
+        }
+        
+        // DEBUG: Log packet decision for node 2000
+        if (nodeId == 2000) {
+            EV_WARN << "[DEBUG-SELFPACKET] Node 2000 packet decision: sendDsdv=" << sendDsdv 
+                    << " sendData=" << sendData << " sendForward=" << sendForward 
+                    << " sendRouting=" << sendRouting << endl;
         }
 
         // Now there could be between none and three types of packets due to be sent. Decide between routing and the
