@@ -2370,6 +2370,14 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
     LoRaAppPacket *dataPacket = packet->dup();
 
+    // DEBUG: Log packet reception for DSDV debugging
+    if (useDSDV && (packet->getSource() == 1000 || packet->getDestination() == 2000)) {
+        EV_WARN << "[DSDV-FWD-DEBUG] Node " << nodeId << " received DATA packet: "
+                << "src=" << packet->getSource() << " dst=" << packet->getDestination()
+                << " via=" << packet->getVia() << " ttl=" << packet->getTtl()
+                << " seq=" << packet->getDataInt() << endl;
+    }
+
     // Check for too old packets with TTL <= 1
     if (packet->getTtl() <= 1) {
         bubble("This packet has reached TTL expiration!");
@@ -2407,6 +2415,13 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
                 } else {
                     bubble("Saving packet to forward it later!");
                     receivedDataPacketsToForwardUnique++;
+
+                    // DEBUG: Log packet enqueue for DSDV debugging
+                    if (useDSDV && (packet->getSource() == 1000 || packet->getDestination() == 2000)) {
+                        EV_WARN << "[DSDV-FWD-DEBUG] Node " << nodeId << " ENQUEUING packet for forward: "
+                                << "src=" << packet->getSource() << " dst=" << packet->getDestination()
+                                << " ttl_after_decr=" << (packet->getTtl() - 1) << endl;
+                    }
 
                     dataPacket->setTtl(packet->getTtl() - 1);
                     if (packetsToForwardMaxVectorSize == 0 || LoRaPacketsToForward.size()<packetsToForwardMaxVectorSize) {
@@ -2848,6 +2863,18 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
         sanitizeRoutingTable();
 
         int routeIndex = getBestRouteIndexTo(forwardPacket->getDestination());
+
+        // DEBUG: Log route lookup for DSDV debugging
+        if (useDSDV && (forwardPacket->getSource() == 1000 || forwardPacket->getDestination() == 2000)) {
+            EV_WARN << "[DSDV-FWD-DEBUG] Node " << nodeId << " forwarding packet: "
+                    << "src=" << forwardPacket->getSource() << " dst=" << forwardPacket->getDestination()
+                    << " routeIndex=" << routeIndex;
+            if (routeIndex >= 0) {
+                EV_WARN << " via=" << singleMetricRoutingTable[routeIndex].via
+                        << " metric=" << singleMetricRoutingTable[routeIndex].metric;
+            }
+            EV_WARN << endl;
+        }
 
         switch (routingMetric) {
             case FLOODING_BROADCAST_SINGLE_SF:
