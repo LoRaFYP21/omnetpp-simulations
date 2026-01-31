@@ -51,6 +51,9 @@ class LoRaRoute {
     int id;
     int priMetric;
     int secMetric;
+    // DSDV fields
+    int seqNum;   // destination sequence number (prefer higher)
+    int flags;    // bit flags (e.g., valid/invalid); 0=valid, 1=invalid
 }
 
 packet LoRaAppPacket {
@@ -62,5 +65,12 @@ packet LoRaAppPacket {
     int ttl;
     int via;
 	LoRaRoute routingTable[];
+
+    // Optional DSDV full-dump fragmentation header (ignored in legacy)
+    int fullDumpId;     // unique id for this full table dump
+    int totalChunks;    // number of chunks in this dump
+    int chunkId;        // current chunk index
+    int entryCount;     // number of entries in this chunk
+
 	simtime_t departureTime;
 }

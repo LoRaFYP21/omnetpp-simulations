@@ -399,6 +399,146 @@ void LoRaNodeApp::initialize(int stage) {
         routingFrozenTime = -1;
         locallyConverged = false;
 
+        // Initialize routing tables BEFORE protocol initialization
+        singleMetricRoutingTable = {};
+        dualMetricRoutingTable = {};
+
+        // Get node ID with rescue/end offset so CSV paths are correct
+        nodeId = getContainingNode(this)->getIndex();
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
+            bool isEnd = false;
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = hostMod->par("iAmRescue").boolValue();
+            }
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = hostMod->par("iAmEnd").boolValue();
+            } else {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                }
+            }
+            if (isRescue) {
+                nodeId += 2000;
+            } else if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+            }
+        }
+
+        // Open CSV files BEFORE DSDV initialization so logging works
+        openRoutingCsv();
+        openDeliveredCsv();
+
+        // ============================================================
+        // DSDV PROTOCOL INITIALIZATION
+        // ============================================================
+        // Read routingProtocol parameter and initialize DSDV if selected
+        std::string routingProtocolStr = par("routingProtocol").stdstringValue();
+        useDSDV = (routingProtocolStr == "dsdv");
+
+        EV_WARN << ">>>>>>> [PRE-DSDV] Node " << nodeId << " routingProtocol='" << routingProtocolStr 
+                << "' useDSDV=" << useDSDV << " <<<<<<" << endl;
+
+        if (useDSDV) {
+            EV_WARN << ">>>>>>> [DSDV-INIT] Node " << nodeId << " ENTERING DSDV initialization block <<<<<<" << endl;
+            
+            // Read DSDV parameters
+            simtime_t dsdvIncrementalPeriod = par("dsdvIncrementalPeriod");
+            simtime_t dsdvFullUpdatePeriod = par("dsdvFullUpdatePeriod");
+            simtime_t dsdvTriggeredMinInterval = par("dsdvTriggeredMinInterval");
+            simtime_t dsdvRouteLifetime = par("dsdvRouteLifetime");
+            simtime_t dsdvTimerJitterMin = par("dsdvTimerJitterMin");
+            simtime_t dsdvTimerJitterMax = par("dsdvTimerJitterMax");
+            simtime_t dsdvNeighborTimeout = par("dsdvNeighborTimeout");
+            bool dsdvUseChunking = par("dsdvUseChunking");
+            int dsdvMaxEntriesPerPacket = par("dsdvMaxEntriesPerPacket");
+
+            // Initialize own sequence number (start at 0, increments on changes)
+            ownSeqNum = 0;
+
+            EV_WARN << ">>>>>>> [DSDV-INIT] Node " << nodeId << " about to add self-route <<<<<<" << endl;
+            
+            // CRITICAL: Add self-route so this node advertises itself in DSDV packets
+            // This allows other nodes to learn routes TO this node (essential for end/rescue nodes)
+            singleMetricRoute selfRoute;
+            selfRoute.id = nodeId;           // Destination is self
+            selfRoute.via = nodeId;          // Direct route to self
+            selfRoute.metric = 0;            // Zero hops to self
+            selfRoute.valid = simTime() + 999999;  // Never expires
+            selfRoute.seqNum = ownSeqNum;    // Current sequence number
+            selfRoute.isValid = true;
+            selfRoute.installTime = simTime();
+            // Initialize window array to 0
+            for (int i = 0; i < 33; i++) {
+                selfRoute.window[i] = 0;
+            }
+            singleMetricRoutingTable.push_back(selfRoute);
+            
+            EV_WARN << ">>>>>>> [DSDV-INIT] Node " << nodeId << " added self-route to table, table size now: " 
+                    << singleMetricRoutingTable.size() << " <<<<<<" << endl;
+            EV_INFO << "[DSDV] Added self-route: dest=" << nodeId 
+                    << " metric=0 seqNum=" << ownSeqNum << endl;
+
+            // CRITICAL: Add self to changedSet so it gets advertised immediately
+            // Without this, nodes won't advertise themselves until first full-dump (120s)
+            changedSet.insert(nodeId);
+            EV_INFO << "[DSDV] Added self to changedSet for immediate advertisement" << endl;
+
+            // Clear neighbor last-heard timestamps
+            lastHeard.clear();
+
+            // Reset triggered update debounce timer
+            lastTriggeredUpdateTime = SIMTIME_ZERO;
+
+            // Compute neighborTimeout if not explicitly set or invalid
+            // Use heuristic: ~2.5 × incremental period
+            if (dsdvNeighborTimeout <= SIMTIME_ZERO || dsdvNeighborTimeout < dsdvIncrementalPeriod) {
+                dsdvNeighborTimeout = 2.5 * dsdvIncrementalPeriod;
+                EV_INFO << "[DSDV] Computed dsdvNeighborTimeout=" << dsdvNeighborTimeout 
+                        << " (2.5 × incremental period)" << endl;
+            }
+
+            // Schedule periodic DSDV timers with random jitter to avoid synchronization
+            // Jitter range: uniform(jitterMin, jitterMax)
+            simtime_t incrementalJitter = uniform(dsdvTimerJitterMin.dbl(), dsdvTimerJitterMax.dbl());
+            simtime_t fullJitter = uniform(dsdvTimerJitterMin.dbl(), dsdvTimerJitterMax.dbl());
+
+            simtime_t nextIncrementalUpdate = simTime() + dsdvIncrementalPeriod + incrementalJitter;
+            simtime_t nextFullUpdate = simTime() + dsdvFullUpdatePeriod + fullJitter;
+
+            // Create and schedule DSDV timer messages (use member variables)
+            dsdvIncrementalTimer = new cMessage("dsdvIncrementalTimer");
+            dsdvFullTimer = new cMessage("dsdvFullTimer");
+
+            scheduleAt(nextIncrementalUpdate, dsdvIncrementalTimer);
+            scheduleAt(nextFullUpdate, dsdvFullTimer);
+
+            EV_INFO << "[DSDV] Initialized DSDV routing protocol for node " << nodeId << endl;
+            EV_INFO << "[DSDV]   Incremental period: " << dsdvIncrementalPeriod 
+                    << " (next at " << nextIncrementalUpdate << ")" << endl;
+            EV_INFO << "[DSDV]   Full update period: " << dsdvFullUpdatePeriod 
+                    << " (next at " << nextFullUpdate << ")" << endl;
+            EV_INFO << "[DSDV]   Triggered min interval: " << dsdvTriggeredMinInterval << endl;
+            EV_INFO << "[DSDV]   Route lifetime: " << dsdvRouteLifetime << endl;
+            EV_INFO << "[DSDV]   Neighbor timeout: " << dsdvNeighborTimeout << endl;
+            EV_INFO << "[DSDV]   Chunking enabled: " << (dsdvUseChunking ? "yes" : "no") << endl;
+            EV_INFO << "[DSDV]   Max entries per packet: " << dsdvMaxEntriesPerPacket << endl;
+            
+            EV_WARN << ">>>>>>> [DSDV-INIT] Node " << nodeId << " about to log initial snapshot, table size: " 
+                    << singleMetricRoutingTable.size() << " <<<<<<" << endl;
+            // Log initial routing table state (contains self-route)
+            logRoutingSnapshot("dsdv_initialized");
+            EV_WARN << ">>>>>>> [DSDV-INIT] Node " << nodeId << " completed logRoutingSnapshot <<<<<<" << endl;
+        } else {
+            EV_INFO << "[Routing] Using legacy routing protocol (DSDV disabled)" << endl;
+        }
+        // ============================================================
+        // END DSDV INITIALIZATION
+        // ============================================================
+
         // Initialize global convergence accounting once per process
         // Determine participating nodes: use numberOfNodes (relay nodes) unless routingMetric == 0 (end nodes)
         if (globalNodesExpectingConvergence == 0) {
@@ -510,43 +650,7 @@ void LoRaNodeApp::initialize(int stage) {
         DataPacketsForMe = {};
         ACKedNodes = {};
 
-    //Routing table
-        singleMetricRoutingTable = {};
-        dualMetricRoutingTable = {};
-
-    // Note: prepare CSV paths after nodeId is known (set further down)
-
-
-        //Node identifier (re-assign and apply rescue/end offset consistently)
-            nodeId = getContainingNode(this)->getIndex();
-        {
-            cModule *hostMod = getContainingNode(this);
-            bool isRescue = false;
-            bool isEnd = false;
-            if (hostMod && hostMod->hasPar("iAmRescue")) {
-                isRescue = hostMod->par("iAmRescue").boolValue();
-            }
-            if (hostMod && hostMod->hasPar("iAmEnd")) {
-                isEnd = hostMod->par("iAmEnd").boolValue();
-            } else {
-                cModule *parent = getParentModule();
-                if (parent) {
-                    const char *baseName = parent->getName();
-                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
-                }
-            }
-            if (isRescue) {
-                nodeId += 2000;
-            } else if (isEnd && routingMetric != 0) {
-                nodeId += 1000;
-            }
-        }
-
-    // Prepare routing CSV path (per-node file) now that nodeId is set
-    openRoutingCsv();
-
-    // Prepare delivered CSV path (per-node file)
-    openDeliveredCsv();
+        // Note: routing tables, nodeId, and CSV paths initialized earlier (before DSDV)
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -644,10 +748,13 @@ void LoRaNodeApp::initialize(int stage) {
                 break;
             // Schedule selfRoutingPackets
             default:
-        // If global convergence already announced, suppress routing beacons
-        routingPacketsDue = ! (stopRoutingWhenAllConverged && globalConvergedFired);
-                nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
-                EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
+        // Skip legacy routing timer if DSDV is active (DSDV has its own timers)
+        if (!useDSDV) {
+            // If global convergence already announced, suppress routing beacons
+            routingPacketsDue = ! (stopRoutingWhenAllConverged && globalConvergedFired);
+            nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
+            EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
+        }
                 break;
         }
 
@@ -930,6 +1037,16 @@ void LoRaNodeApp::finish() {
     dataPacketsForMeLatency.recordAs("dataPacketsForMeLatency");
     dataPacketsForMeUniqueLatency.recordAs("dataPacketsForMeUniqueLatency");
 
+    // Cleanup DSDV timers
+    if (dsdvIncrementalTimer) {
+        cancelAndDelete(dsdvIncrementalTimer);
+        dsdvIncrementalTimer = nullptr;
+    }
+    if (dsdvFullTimer) {
+        cancelAndDelete(dsdvFullTimer);
+        dsdvFullTimer = nullptr;
+    }
+
     // No persistent CSV stream; snapshots overwrite per write
 }
 
@@ -959,6 +1076,57 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         return; // Ignore timers after failure
     }
 
+    // Handle DSDV timer messages (set flags for coordinated packet scheduling)
+    if (useDSDV) {
+        if (msg == dsdvIncrementalTimer) {
+            EV_INFO << "[DSDV] Incremental update timer fired at " << simTime() << endl;
+            
+            // Set flag to send incremental update when MAC is ready
+            if (!changedSet.empty()) {
+                dsdvPacketDue = true;
+                dsdvSendFullDump = false;
+                nextDsdvPacketTransmissionTime = simTime();
+                EV_INFO << "[DSDV] Scheduled incremental update with " << changedSet.size() << " changed routes" << endl;
+                
+                // Trigger selfPacket to wake up and check for transmission
+                if (!selfPacket->isScheduled()) {
+                    scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
+                }
+            } else {
+                EV_INFO << "[DSDV] No changes to advertise, skipping incremental update" << endl;
+            }
+            
+            // Reschedule with jitter
+            simtime_t period = par("dsdvIncrementalPeriod");
+            simtime_t jitterMin = par("dsdvTimerJitterMin");
+            simtime_t jitterMax = par("dsdvTimerJitterMax");
+            simtime_t jitter = uniform(jitterMin.dbl(), jitterMax.dbl());
+            scheduleAt(simTime() + period + jitter, dsdvIncrementalTimer);
+            return;
+        }
+        if (msg == dsdvFullTimer) {
+            EV_INFO << "[DSDV] Full update timer fired at " << simTime() << endl;
+            
+            // Set flag to send full-dump update when MAC is ready
+            dsdvPacketDue = true;
+            dsdvSendFullDump = true;
+            nextDsdvPacketTransmissionTime = simTime();
+            
+            // Trigger selfPacket to wake up and check for transmission
+            if (!selfPacket->isScheduled()) {
+                scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
+            }
+            
+            // Reschedule with jitter
+            simtime_t period = par("dsdvFullUpdatePeriod");
+            simtime_t jitterMin = par("dsdvTimerJitterMin");
+            simtime_t jitterMax = par("dsdvTimerJitterMax");
+            simtime_t jitter = uniform(jitterMin.dbl(), jitterMax.dbl());
+            scheduleAt(simTime() + period + jitter, dsdvFullTimer);
+            return;
+        }
+    }
+
     // If global convergence reached, stop routing immediately in all nodes
     if (globalConvergedFired) {
         routingPacketsDue = false;
@@ -975,6 +1143,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         bool sendData = false;
         bool sendForward = false;
         bool sendRouting = false;
+        bool sendDsdv = false;
 
         // Check if there are data packets to send, and if it is time to send them
         // TODO: Not using dataPacketsDue ???
@@ -992,6 +1161,11 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         if ( routingPacketsDue && simTime() >= nextRoutingPacketTransmissionTime ) {
             sendRouting = true;
         }
+        
+        // Check if there are DSDV packets to send
+        if ( dsdvPacketDue && simTime() >= nextDsdvPacketTransmissionTime ) {
+            sendDsdv = true;
+        }
 
         // Now there could be between none and three types of packets due to be sent. Decide between routing and the
         // other two types randomly with the probability from the routingPacketPriotity parameter
@@ -1005,9 +1179,42 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
                 sendRouting = false;
             }
         }
+        
+        // DSDV routing packets have same priority as legacy routing
+        if (sendDsdv && (sendData || sendForward) ) {
+            if (bernoulli(routingPacketPriority)) {
+                sendData = false;
+                sendForward = false;
+            }
+            else {
+                sendDsdv = false;
+            }
+        }
 
+        // Send DSDV routing packet
+        if (sendDsdv) {
+            txDuration = sendDSDVRoutingPacket(dsdvSendFullDump);
+            dsdvPacketDue = false;
+            
+            if (dsdvSendFullDump) {
+                changedSet.clear(); // full dump includes everything
+            } else {
+                changedSet.clear(); // incremental update sent
+            }
+            
+            if (enforceDutyCycle) {
+                dutyCycleEnd = simTime() + txDuration/dutyCycle;
+                nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl()/dutyCycle);
+            }
+            else {
+                nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl());
+            }
+            
+            // Update nextScheduleTime to account for this transmission
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), simTime().dbl() + txDuration.dbl());
+        }
         // Send routing packet
-        if (sendRouting) {
+        else if (sendRouting) {
             txDuration = sendRoutingPacket();
             if (enforceDutyCycle) {
                 // Update duty cycle end
@@ -1100,7 +1307,7 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
         // Schedule a self message to send routing, data or forward packets. Since some calculations lose precision, add an extra delay
         // (10x simtime-resolution unit) to avoid timing conflicts in the LoRaMac layer when simulations last very long.
-        if (routingPacketsDue || dataPacketsDue || forwardPacketsDue) {
+        if (routingPacketsDue || dataPacketsDue || forwardPacketsDue || dsdvPacketDue) {
             scheduleAt(nextScheduleTime + 10*simTimeResolution, selfPacket);
         }
 
@@ -1225,13 +1432,137 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     // Check it actually is a routing message
     if (packet->getMsgType() == ROUTING) {
 
-        // If routing is frozen, we still count the packet but ignore any table modifications
-        if (routingFrozen) {
-            receivedRoutingPackets++;
-            return; // tables remain stable
+        receivedRoutingPackets++;
+
+        // ========================================================================
+        // DSDV ROUTING PROTOCOL PROCESSING
+        // ========================================================================
+        if (useDSDV) {
+            int sender = packet->getSource();
+            
+            EV_INFO << "[DSDV] Received routing packet from node " << sender 
+                    << " with " << packet->getRoutingTableArraySize() << " routes" << endl;
+
+            // Process each route entry in the received packet
+            for (int i = 0; i < packet->getRoutingTableArraySize(); i++) {
+                LoRaRoute receivedRoute = packet->getRoutingTable(i);
+                int destId = receivedRoute.getId();
+                int receivedSeqNum = receivedRoute.getSeqNum();
+                int receivedMetric = receivedRoute.getPriMetric();
+                int receivedFlags = receivedRoute.getFlags();
+                bool isUnreachable = (receivedFlags & 1); // flag bit 0 indicates invalid/unreachable
+
+                // Skip self routes
+                if (destId == nodeId) {
+                    continue;
+                }
+
+                // Compute the metric if we route through this neighbor
+                int computedMetric = receivedMetric + 1;
+
+                // Check if we already have a route to this destination
+                int existingIdx = getBestRouteIndexTo(destId);
+                
+                if (existingIdx < 0) {
+                    // No existing route - install this one
+                    if (isUnreachable) {
+                        EV_INFO << "[DSDV] Ignoring unreachable advertisement for " << destId 
+                                << " (no existing route)" << endl;
+                        continue;
+                    }
+
+                    singleMetricRoute newRoute;
+                    newRoute.id = destId;
+                    newRoute.via = sender;
+                    newRoute.metric = computedMetric;
+                    newRoute.valid = simTime() + par("dsdvRouteLifetime").doubleValue();
+                    newRoute.seqNum = receivedSeqNum;
+                    newRoute.isValid = true;
+                    newRoute.installTime = simTime();
+
+                    singleMetricRoutingTable.push_back(newRoute);
+                    changedSet.insert(destId);
+
+                    EV_INFO << "[DSDV] Installed new route to " << destId 
+                            << " via " << sender 
+                            << " (seq=" << receivedSeqNum 
+                            << ", metric=" << computedMetric << ")" << endl;
+                } else {
+                    // Existing route found - apply DSDV update rules
+                    auto &existingRoute = singleMetricRoutingTable[existingIdx];
+                    int existingSeqNum = existingRoute.seqNum;
+                    int existingMetric = existingRoute.metric;
+
+                    bool shouldUpdate = false;
+                    std::string reason = "";
+
+                    // DSDV rule 1: Higher sequence number always wins
+                    if (receivedSeqNum > existingSeqNum) {
+                        shouldUpdate = true;
+                        reason = "higher_seq";
+                    }
+                    // DSDV rule 2: Same sequence number, better metric
+                    else if (receivedSeqNum == existingSeqNum && computedMetric < existingMetric) {
+                        shouldUpdate = true;
+                        reason = "equal_seq_better_metric";
+                    }
+                    // DSDV rule 3: Same sequence number, same next hop (refresh)
+                    else if (receivedSeqNum == existingSeqNum && sender == existingRoute.via) {
+                        shouldUpdate = true;
+                        reason = "same_nexthop_refresh";
+                    }
+
+                    if (shouldUpdate) {
+                        if (isUnreachable) {
+                            // Mark route as invalid but keep in table
+                            existingRoute.isValid = false;
+                            existingRoute.metric = INFINITE_METRIC;
+                            existingRoute.seqNum = receivedSeqNum;
+                            existingRoute.installTime = simTime();
+                            changedSet.insert(destId);
+                            
+                            EV_INFO << "[DSDV] Marked route to " << destId << " as unreachable "
+                                    << "(seq=" << receivedSeqNum << ", reason=" << reason << ")" << endl;
+                        } else {
+                            // Update to better/newer route
+                            existingRoute.via = sender;
+                            existingRoute.metric = computedMetric;
+                            existingRoute.seqNum = receivedSeqNum;
+                            existingRoute.isValid = true;
+                            existingRoute.valid = simTime() + par("dsdvRouteLifetime").doubleValue();
+                            existingRoute.installTime = simTime();
+                            changedSet.insert(destId);
+
+                            EV_INFO << "[DSDV] Updated route to " << destId 
+                                    << " via " << sender 
+                                    << " (seq=" << receivedSeqNum 
+                                    << ", metric=" << computedMetric 
+                                    << ", reason=" << reason << ")" << endl;
+                        }
+                    } else {
+                        EV_DETAIL << "[DSDV] Ignored route to " << destId 
+                                  << " (existing seq=" << existingSeqNum 
+                                  << ", received seq=" << receivedSeqNum << ")" << endl;
+                    }
+                }
+            }
+
+            // Sanitize and log the routing table
+            sanitizeRoutingTable();
+            routingTableSize.collect(singleMetricRoutingTable.size());
+            logRoutingSnapshot("dsdv_packet_processed");
+            
+            return; // DSDV processing complete
         }
 
-        receivedRoutingPackets++;
+        // ========================================================================
+        // LEGACY ROUTING PROTOCOL PROCESSING (unchanged)
+        // ========================================================================
+
+        // If routing is frozen, we still count the packet but ignore any table modifications
+        if (routingFrozen) {
+            return; // tables remain stable
+        }
 
     sanitizeRoutingTable();
 
@@ -1242,13 +1573,14 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 
     // ------------------------------------------------------------------
     // FILTER: Retain only routes that lead to end nodes (IDs >= 1000).
-    // Requirement: Relay nodes should keep ONLY routes to end nodes
-    // (e.g., 1000, 1001) and discard intermediate relay destinations.
-    // End node IDs are offset by +1000 earlier during initialization.
-    // We derive end node range from numberOfEndNodes parameter if present;
-    // fallback: assume any id >= 1000 is an end node.
+    // IMPORTANT: Only apply this filter for legacy routing protocol!
+    // In DSDV, relay nodes need routes to ALL nodes (relays + end + rescue)
+    // for proper multi-hop routing. Legacy protocol uses broadcast-based
+    // forwarding where relays only need to know about end node destinations.
     // ------------------------------------------------------------------
-    filterRoutesToEndNodes();
+    if (!useDSDV) {
+        filterRoutesToEndNodes();
+    }
 
     // After filtering, collect the (reduced) size again to reflect final table
     routingTableSize.collect(singleMetricRoutingTable.size());
@@ -1508,7 +1840,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
     // Enforce relay-side filtering: keep only end-node destinations in tables
     // before collecting size and logging the snapshot. This ensures
     // node_X_routing.csv reflects only end-node routes (e.g., 1000, 1001).
-    filterRoutesToEndNodes();
+    // IMPORTANT: Only for legacy routing, not DSDV
+    if (!useDSDV) {
+        filterRoutesToEndNodes();
+    }
     routingTableSize.collect(singleMetricRoutingTable.size());
 
     // Log snapshot after processing routing packet (post-filtering)
@@ -1829,7 +2164,7 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
     if (!routingCsv.is_open()) return;
 
     // Write header each time
-    routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric" << std::endl;
+    routingCsv << "simTime,event,nodeId,metricType,tableSize,id,via,metric,validUntil,sf,priMetric,secMetric,seqNum,isValid" << std::endl;
 
     const char *metricName = nullptr;
     switch (routingMetric) {
@@ -1859,6 +2194,8 @@ void LoRaNodeApp::logRoutingSnapshot(const char *eventName) {
                    << ",sf="
                    << ",priMetric="
                    << ",secMetric="
+                   << ",seqNum=" << r.seqNum
+                   << ",isValid=" << (r.isValid ? "true" : "false")
 
                    << std::endl;
     }
@@ -2295,11 +2632,30 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             case RSSI_SUM_SINGLE_SF:
             case RSSI_PROD_SINGLE_SF:
             case ETX_SINGLE_SF:
-                if ( routeIndex >= 0 ) {
+                // Check if this is an end node or rescue node (they always broadcast data)
+                if (isEndNodeHost(this) || isRescueNodeHost(this)) {
+                    // End/rescue nodes: Always broadcast data packets (don't use routing tables)
+                    dataPacket->setVia(BROADCAST_ADDRESS);
+                    if (localData)
+                        broadcastDataPackets++;
+                    else
+                        broadcastForwardedPackets++;
+                }
+                else if ( routeIndex >= 0 ) {
+                    // Relay nodes: Use routing table for unicast forwarding
                     dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
                 else {
-                    // Broadcast fallback when no route known
+                    // Relay nodes with no route
+                    if (useDSDV) {
+                        // DSDV: Drop packet when relay has no route (no broadcast fallback)
+                        EV_WARN << "[DSDV] Relay node: No route to destination " << dataPacket->getDestination() 
+                                << " - dropping packet (seq=" << dataPacket->getDataInt() << ")" << endl;
+                        unicastNoRouteDrops++;
+                        delete dataPacket;
+                        return 0;
+                    }
+                    // Legacy: Broadcast fallback
                     dataPacket->setVia(BROADCAST_ADDRESS);
                     if (localData)
                         broadcastDataPackets++;
@@ -2465,10 +2821,23 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
             case RSSI_SUM_SINGLE_SF:
             case RSSI_PROD_SINGLE_SF:
             case ETX_SINGLE_SF:
+                // Note: End/rescue nodes never reach here (forwarding blocked by iAmEnd/iAmRescue)
+                // This code only executes for relay nodes
                 if ( routeIndex >= 0 ) {
+                    // Relay nodes: Use routing table for unicast forwarding
                     forwardPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                 }
                 else{
+                    // Relay nodes with no route
+                    if (useDSDV) {
+                        // DSDV: Drop packet when relay has no route (no broadcast fallback)
+                        EV_WARN << "[DSDV] Relay node: No route to destination " << forwardPacket->getDestination() 
+                                << " - dropping forwarded packet (seq=" << forwardPacket->getDataInt() << ")" << endl;
+                        unicastNoRouteDrops++;
+                        delete forwardPacket;
+                        return 0;
+                    }
+                    // Legacy: Broadcast fallback
                     forwardPacket->setVia(BROADCAST_ADDRESS);
                     broadcastForwardedPackets++;
                 }
@@ -2557,7 +2926,10 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
             transmit = true;
 
             // Ensure we advertise only end-node routes (strip others first)
-            filterRoutesToEndNodes();
+            // IMPORTANT: Only for legacy routing, not DSDV
+            if (!useDSDV) {
+                filterRoutesToEndNodes();
+            }
 
             // Build a unique set of destination IDs from the current routing table
             // and ALWAYS include a self-route (id=nodeId, metric=0) so neighbors learn routes to us.
@@ -2605,7 +2977,10 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
             transmit = true;
 
             // Ensure we advertise only end-node routes (strip others first)
-            filterRoutesToEndNodes();
+            // IMPORTANT: Only for legacy routing, not DSDV
+            if (!useDSDV) {
+                filterRoutesToEndNodes();
+            }
 
             loRaSF = pickCADSF();
             cInfo->setLoRaSF(loRaSF);
@@ -2660,6 +3035,141 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
     else {
         delete routingPacket;
     }
+    return txDuration;
+}
+
+simtime_t LoRaNodeApp::sendDSDVRoutingPacket(bool fullDump) {
+    if (failed) return 0;
+
+    // Sanitize routing table before sending
+    sanitizeRoutingTable();
+
+    // Build list of routes to advertise
+    std::vector<LoRaRoute> routesToAdvertise;
+
+    // Increment own sequence number before advertising (destination freshness)
+    ownSeqNum++;
+
+    // Always include self-route with our own sequence number
+    LoRaRoute selfRoute;
+    selfRoute.setId(nodeId);
+    selfRoute.setPriMetric(0);
+    selfRoute.setSeqNum(ownSeqNum);
+    selfRoute.setFlags(0); // valid
+    routesToAdvertise.push_back(selfRoute);
+
+    if (fullDump) {
+        // Full dump: advertise all valid routes in routing table
+        EV_INFO << "[DSDV] Preparing full dump with " << singleMetricRoutingTable.size() << " routes" << endl;
+        for (const auto &rt : singleMetricRoutingTable) {
+            if (rt.id != nodeId) { // skip self (already added)
+                LoRaRoute route;
+                route.setId(rt.id);
+                route.setPriMetric(rt.metric);
+                route.setSeqNum(rt.seqNum);
+                route.setFlags(rt.isValid ? 0 : 1);
+                routesToAdvertise.push_back(route);
+            }
+        }
+    } else {
+        // Incremental: advertise only changed routes
+        EV_INFO << "[DSDV] Preparing incremental update with " << changedSet.size() << " changed routes" << endl;
+        for (int destId : changedSet) {
+            if (destId == nodeId) continue; // self already added
+            
+            // Find route in routing table
+            int idx = getBestRouteIndexTo(destId);
+            if (idx >= 0) {
+                LoRaRoute route;
+                route.setId(singleMetricRoutingTable[idx].id);
+                route.setPriMetric(singleMetricRoutingTable[idx].metric);
+                route.setSeqNum(singleMetricRoutingTable[idx].seqNum);
+                route.setFlags(singleMetricRoutingTable[idx].isValid ? 0 : 1);
+                routesToAdvertise.push_back(route);
+            }
+        }
+    }
+
+    if (routesToAdvertise.empty()) {
+        EV_WARN << "[DSDV] No routes to advertise" << endl;
+        return 0;
+    }
+
+    // Check if chunking is needed
+    bool useChunking = par("dsdvUseChunking").boolValue();
+    int maxEntriesPerPacket = par("dsdvMaxEntriesPerPacket").intValue();
+    int totalRoutes = routesToAdvertise.size();
+    
+    // For now, send only first chunk per transmission (chunking across multiple MAC cycles not implemented)
+    // TODO: Implement proper chunking with queuing for multi-chunk full dumps
+    int totalChunks = useChunking ? ((totalRoutes + maxEntriesPerPacket - 1) / maxEntriesPerPacket) : 1;
+    int fullDumpId = fullDump ? intuniform(1, 65535) : 0; // unique ID for this dump
+
+    // Only send first chunk - additional chunks would require queuing mechanism
+    int chunkIdx = 0;
+    int startIdx = chunkIdx * maxEntriesPerPacket;
+    int endIdx = std::min(startIdx + maxEntriesPerPacket, totalRoutes);
+    int chunkSize = endIdx - startIdx;
+
+    LoRaAppPacket *routingPacket = new LoRaAppPacket("DSDVRoutingPacket");
+    routingPacket->setRoutingTableArraySize(chunkSize);
+
+    // Copy routes for this chunk
+    for (int i = 0; i < chunkSize; i++) {
+        routingPacket->setRoutingTable(i, routesToAdvertise[startIdx + i]);
+    }
+
+    // Set DSDV full-dump header fields
+    if (fullDump && useChunking && totalChunks > 1) {
+        routingPacket->setFullDumpId(fullDumpId);
+        routingPacket->setTotalChunks(totalChunks);
+        routingPacket->setChunkId(chunkIdx);
+        routingPacket->setEntryCount(chunkSize);
+        EV_INFO << "[DSDV] Sending chunk " << chunkIdx << "/" << totalChunks 
+                << " (" << chunkSize << " entries, dumpId=" << fullDumpId << ")" << endl;
+        EV_WARN << "[DSDV] Multi-chunk transmission not fully implemented - only first chunk sent" << endl;
+    } else {
+        routingPacket->setFullDumpId(0);
+        routingPacket->setTotalChunks(1);
+        routingPacket->setChunkId(0);
+        routingPacket->setEntryCount(chunkSize);
+    }
+
+    // Set packet fields
+    routingPacket->setMsgType(ROUTING);
+    routingPacket->setSource(nodeId);
+    routingPacket->setVia(nodeId);
+    routingPacket->setDestination(BROADCAST_ADDRESS);
+    routingPacket->getOptions().setAppACKReq(false);
+    routingPacket->setByteLength(routingPacketMaxSize);
+    routingPacket->setDepartureTime(simTime());
+    routingPacket->setDataInt(sentRoutingPackets + 1);
+
+    // Set LoRa control info
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+    routingPacket->setControlInfo(cInfo);
+
+    // Record stats
+    sentPackets++;
+    sentRoutingPackets++;
+    txSfVector.record(loRaSF);
+    txTpVector.record(loRaTP);
+    allTxPacketsSFStats.collect(loRaSF);
+    routingTxPacketsSFStats.collect(loRaSF);
+
+    // Calculate TX duration and send
+    simtime_t txDuration = calculateTransmissionDuration(routingPacket);
+
+    send(routingPacket, "appOut");
+    emit(LoRa_AppPacketSent, loRaSF);
+
+    EV_INFO << "[DSDV] Sent routing packet with " << chunkSize << " routes" << endl;
+
     return txDuration;
 }
 
@@ -3264,9 +3774,10 @@ void LoRaNodeApp::exportRoutingTables() {
         fcsv << folder << sep << "node" << nodeId << "_single.csv";
         std::ofstream ofs(fcsv.str(), std::ios::out | std::ios::trunc);
         if (ofs.is_open()) {
-            ofs << "id,via,metric,validUntil" << std::endl;
+            ofs << "id,via,metric,validUntil,seqNum,isValid" << std::endl;
             for (auto &r : singleMetricRoutingTable) {
-                ofs << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid << std::endl;
+                ofs << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid 
+                    << ',' << r.seqNum << ',' << (r.isValid ? "true" : "false") << std::endl;
             }
         }
     }
@@ -3291,7 +3802,9 @@ void LoRaNodeApp::exportRoutingTables() {
             txt << "Node " << nodeId << " Routing Table (simTime=" << simTime() << ")\n";
             txt << "Single-metric entries: " << singleMetricRoutingTable.size() << "\n";
             for (auto &r : singleMetricRoutingTable) {
-                txt << " dest=" << r.id << " via=" << r.via << " metric=" << r.metric << " validUntil=" << r.valid << "\n";
+                txt << " dest=" << r.id << " via=" << r.via << " metric=" << r.metric 
+                    << " validUntil=" << r.valid << " seqNum=" << r.seqNum 
+                    << " isValid=" << (r.isValid ? "true" : "false") << "\n";
             }
             txt << "Dual-metric entries: " << dualMetricRoutingTable.size() << "\n";
             for (auto &r : dualMetricRoutingTable) {

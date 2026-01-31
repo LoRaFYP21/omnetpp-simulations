@@ -108,6 +108,21 @@ simple LoRaNodeApp
     // If true, once all participating nodes have a unique route to every destination (global convergence),
     // all nodes stop sending routing packets immediately.
     bool stopRoutingWhenAllConverged = default(true);
+
+        // DSDV protocol selection and timers (optional, default to legacy behavior)
+        string routingProtocol = default("legacy"); // "legacy" | "dsdv"
+        volatile double dsdvIncrementalPeriod @unit(s) = default(15s);
+        volatile double dsdvFullUpdatePeriod @unit(s) = default(120s);
+        volatile double dsdvTriggeredMinInterval @unit(s) = default(3s);
+        volatile double dsdvRouteLifetime @unit(s) = default(600s);
+        // Random jitter applied to periodic timers to avoid synchronization collisions
+        volatile double dsdvTimerJitterMin @unit(s) = default(0.2s);
+        volatile double dsdvTimerJitterMax @unit(s) = default(2s);
+        // Neighbor timeout for link-break detection (if unset in ini, compute as ~2.5× incremental period)
+        volatile double dsdvNeighborTimeout @unit(s) = default(40s);
+        // Full-dump fragmentation behavior
+        bool dsdvUseChunking = default(true); // true: chunked full-dumps; false: bounded subset per period
+        int dsdvMaxEntriesPerPacket = default(10);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

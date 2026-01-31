@@ -16,6 +16,8 @@ import loranetwork.LoRaApp.LoRaNodeApp; // Use generic node app like LoRaNode
 module endRescueNode
 {
     parameters:
+        int numberOfNodes = default(1);       // Required by LoRaNodeApp
+        int numberOfEndNodes = default(1);    // Required by LoRaNodeApp
         string deploymentType = default("");
         double minX @unit(m) = default(0m);
         double maxX @unit(m) = default(1000m);
@@ -40,9 +42,18 @@ module endRescueNode
     // Set via **.mobilityType in .ini (e.g. "LinearMobility" or any available model).
     // Falls back to StationaryMobility if not overridden.
     string mobilityType = default("StationaryMobility");
+        
+        // DSDV routing parameters - must be declared here for INI file propagation
+        string routingProtocol = default("legacy");
+        volatile double dsdvIncrementalPeriod @unit(s) = default(15s);
+        volatile double dsdvFullUpdatePeriod @unit(s) = default(120s);
+        volatile double dsdvTimerJitterMin @unit(s) = default(0.2s);
+        volatile double dsdvTimerJitterMax @unit(s) = default(2s);
+        
         @networkNode();
         *.interfaceTableModule = default(absPath(".interfaceTable"));
         @display("bgb=297,313;i=device/accesspoint;is=vs");
+        
     submodules:
         interfaceTable: InterfaceTable {
             @display("p=30,26");
@@ -57,6 +68,11 @@ module endRescueNode
         }
         // Use the generic LoRaNodeApp so behavior matches LoRaNode (iAmEnd=true gates end-node rules)
         LoRaNodeApp: LoRaNodeApp {
+            routingProtocol = default(parent.routingProtocol);
+            dsdvIncrementalPeriod = default(parent.dsdvIncrementalPeriod);
+            dsdvFullUpdatePeriod = default(parent.dsdvFullUpdatePeriod);
+            dsdvTimerJitterMin = default(parent.dsdvTimerJitterMin);
+            dsdvTimerJitterMax = default(parent.dsdvTimerJitterMax);
             @display("p=137,32");
         }
     connections allowunconnected:

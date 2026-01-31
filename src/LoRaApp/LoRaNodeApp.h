@@ -18,6 +18,10 @@
 
 #include <omnetpp.h>
 #include <string>
+// DSDV state containers
+#include <unordered_set>
+#include <unordered_map>
+#include <cstdint>
 // CSV logging
 #include <fstream>
 
@@ -69,6 +73,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         simtime_t sendDataPacket();
         simtime_t sendForwardPacket();
         simtime_t sendRoutingPacket();
+        simtime_t sendDSDVRoutingPacket(bool fullDump);
         simtime_t sendAckPacket(int destinationNode, int originalDataSeq);
         void manageReceivedPacketForMe(cMessage *msg);
         void manageReceivedAckPacketForMe(cMessage *msg);
@@ -305,7 +310,11 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
                 int via;
                 double metric;
                 int window[33];
-                simtime_t valid;
+                simtime_t valid;       // existing validity timestamp
+                // DSDV additions
+                std::uint32_t seqNum;  // destination sequence number
+                bool isValid;          // explicit valid/invalid flag (distinct from timestamp)
+                simtime_t installTime; // when this route was installed/updated
         };
         std::vector<singleMetricRoute> singleMetricRoutingTable;
 
@@ -361,6 +370,19 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void announceLocalConvergenceIfNeeded(int uniqueCount);
     void tryStopRoutingGlobally();
 
+    // DSDV node-local state
+    bool useDSDV = false;                                   // true if DSDV protocol selected
+    cMessage *dsdvIncrementalTimer = nullptr;               // periodic incremental update timer
+    cMessage *dsdvFullTimer = nullptr;                      // periodic full-dump timer
+    std::uint32_t ownSeqNum = 0;                            // our own destination seq
+    std::unordered_set<int> changedSet;                     // destinations changed since last ad
+    std::unordered_map<int, simtime_t> lastHeard;           // neighborId -> last time heard
+    simtime_t lastTriggeredUpdateTime = 0;                  // debounce for triggered updates
+    bool dsdvPacketDue = false;                             // flag: DSDV packet ready to send
+    bool dsdvSendFullDump = false;                          // flag: send full dump (vs incremental)
+    simtime_t nextDsdvPacketTransmissionTime = 0;           // when DSDV packet can be sent
+    // Metric sentinel used to denote unreachable in DSDV
+    static const int INFINITE_METRIC = 0x3FFF;
 
 
         /**

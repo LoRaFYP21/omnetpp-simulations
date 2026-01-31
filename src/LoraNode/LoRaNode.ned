@@ -24,6 +24,8 @@ import loranetwork.LoRaApp.LoRaNodeApp;
 module LoRaNode
 {
     parameters:
+        int numberOfNodes = default(1);       // Required by LoRaNodeApp
+        int numberOfEndNodes = default(1);    // Required by LoRaNodeApp
         string deploymentType = default("");
         double minX @unit(m) = default(0m);
         double maxX @unit(m) = default(1000m);
