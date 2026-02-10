@@ -54,7 +54,7 @@ def extract_rescue_node_speed(results_dir=None, config_file=None):
     speed = None
     speed_source = "unknown"
     
-    # Try to find speed in .sca file first (if recorded as scalar)
+    # Try to find speed in .sca file first (check both param and scalar lines)
     if results_dir and os.path.isdir(results_dir):
         sca_files = glob.glob(os.path.join(results_dir, "*.sca"))
         sca_files.sort(key=os.path.getmtime, reverse=True)
@@ -63,23 +63,38 @@ def extract_rescue_node_speed(results_dir=None, config_file=None):
             try:
                 with open(sca_file, 'r') as f:
                     for line in f:
-                        if not line.startswith('scalar '):
-                            continue
-                        parts = line.strip().split()
-                        if len(parts) < 4:
-                            continue
-                        module_path = parts[1]
-                        scalar_name = parts[2]
-                        value_str = parts[3]
+                        # Check both 'param' and 'scalar' lines
+                        if line.startswith('param '):
+                            # param *.loRaRescueNodes[0].mobility.speed 8mps
+                            if 'loRaRescueNodes' in line and 'mobility.speed' in line:
+                                parts = line.strip().split()
+                                if len(parts) >= 3:
+                                    # Extract numeric value (may have units like "8mps")
+                                    value_str = parts[2]
+                                    try:
+                                        # Remove 'mps' suffix if present
+                                        speed = float(value_str.replace('mps', ''))
+                                        speed_source = f"sca:{os.path.basename(sca_file)}"
+                                        return speed, speed_source
+                                    except ValueError:
+                                        pass
                         
-                        # Look for rescue node speed scalar
-                        if 'loRaRescueNodes' in module_path and scalar_name in ('speed', 'mobilitySpeed'):
-                            try:
-                                speed = float(value_str)
-                                speed_source = f"sca:{os.path.basename(sca_file)}"
-                                return speed, speed_source
-                            except ValueError:
-                                pass
+                        elif line.startswith('scalar '):
+                            parts = line.strip().split()
+                            if len(parts) < 4:
+                                continue
+                            module_path = parts[1]
+                            scalar_name = parts[2]
+                            value_str = parts[3]
+                            
+                            # Look for rescue node speed scalar
+                            if 'loRaRescueNodes' in module_path and scalar_name in ('speed', 'mobilitySpeed'):
+                                try:
+                                    speed = float(value_str)
+                                    speed_source = f"sca:{os.path.basename(sca_file)}"
+                                    return speed, speed_source
+                                except ValueError:
+                                    pass
             except Exception as e:
                 continue
     
