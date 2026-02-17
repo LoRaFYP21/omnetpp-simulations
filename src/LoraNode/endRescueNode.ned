@@ -9,6 +9,7 @@ import inet.mobility.contract.IMobility;        // interface so we can parametri
 import inet.mobility.single.LinearMobility; // fallback simple mobility
 import inet.mobility.single.CircleMobility; // fallback simple mobility
 import inet.mobility.single.MassMobility; // fallback simple mobility
+import inet.mobility.single.TurtleMobility; // scripted waypoint-based mobility
 import inet.networklayer.common.InterfaceTable;
 import loranetwork.LoRa.LoRaNic;
 import loranetwork.LoRaApp.LoRaNodeApp; // Use generic node app like LoRaNode

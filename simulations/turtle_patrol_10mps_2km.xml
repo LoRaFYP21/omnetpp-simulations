@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Turtle Mobility Script for Rescue Node - 2km Square Patrol
+- Speed: 10 m/s
+- Pattern: Forward 2000m, turn 90deg right, forward 2000m, turn 90deg right (repeating square)
+-->
+<movement>
+    <!-- Set constant speed of 10 m/s -->
+    <set speed="10"/>
+
+    <!-- Square patrol pattern: 2000m x 2000m - repeat indefinitely -->
+    <repeat count="0">
+        <!-- Side 1: Go 2000m forward -->
+        <forward d="7000"/>
+        <!-- Turn 90 degrees to the right -->
+        <turn angle="90"/>
+
+        <!-- Side 2: Go 2000m forward -->
+        <forward d="7000"/>
+        <!-- Turn 90 degrees to the right -->
+        <turn angle="90"/>
+
+        <!-- Side 3: Go 2000m forward -->
+        <forward d="7000"/>
+        <!-- Turn 90 degrees to the right -->
+        <turn angle="90"/>
+
+        <!-- Side 4: Go 2000m forward (completes the square) -->
+        <forward d="7000"/>
+        <!-- Turn 90 degrees to the right (back to starting orientation) -->
+        <turn angle="90"/>
+    </repeat>
+</movement>
+
