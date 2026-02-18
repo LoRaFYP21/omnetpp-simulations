@@ -100,10 +100,10 @@ void LoRaNodeApp::initialize(int stage) {
     routingMetric = par("routingMetric");
 
     //Current network settings
-    // numberOfNodes = par("numberOfNodes");
-    // std::cout << "numberOfNodes: " << numberOfNodes << std::endl;
-    // numberOfEndNodes = par("numberOfEndNodes");
-    // std::cout << "numberOfEndNodes: " << numberOfEndNodes << std::endl;
+    numberOfNodes = par("numberOfNodes");
+    std::cout << "numberOfNodes: " << numberOfNodes << std::endl;
+    numberOfEndNodes = par("numberOfEndNodes");
+    std::cout << "numberOfEndNodes: " << numberOfEndNodes << std::endl;
 
     if(routingMetric == 0){ // for the END nodes, where no forwarding
         numberOfNodes = par("numberOfEndNodes");
@@ -481,6 +481,36 @@ void LoRaNodeApp::initialize(int stage) {
                     << singleMetricRoutingTable.size() << " <<<<<<" << endl;
             EV_INFO << "[DSDV] Added self-route: dest=" << nodeId 
                     << " metric=0 seqNum=" << ownSeqNum << endl;
+
+            // Calculate expected unique destinations for DSDV freeze:
+            // Total nodes = relay nodes + end nodes + rescue nodes - self
+            int numRescueNodes = hasPar("numberOfRescueNodes") ? par("numberOfRescueNodes").intValue() : 1;
+            expectedUniqueDestinations = numberOfNodes + numberOfEndNodes + numRescueNodes - 1;
+            
+            // Debug logging to verify parameter values
+            EV_WARN << ">>>>>> Node " << nodeId << " DSDV freeze calculation: numberOfNodes=" << numberOfNodes
+                    << " numberOfEndNodes=" << numberOfEndNodes << " numRescueNodes=" << numRescueNodes
+                    << " expectedUnique=" << expectedUniqueDestinations << " <<<<<<" << endl;
+            
+            // Read optional DSDV freeze threshold parameter
+            // If set (>0), use explicit value; otherwise use auto-calculated expectedUniqueDestinations
+            if (hasPar("dsdvFreezeUniqueCount")) {
+                dsdvFreezeUniqueCount = par("dsdvFreezeUniqueCount").intValue();
+            }
+            
+            // Determine final threshold: -1 = disabled, explicit parameter overrides auto-calculation
+            int finalDsdvThreshold = (dsdvFreezeUniqueCount == -1) ? -1 : ((dsdvFreezeUniqueCount > 0) ? dsdvFreezeUniqueCount : expectedUniqueDestinations);
+            
+            EV_WARN << ">>>>>> Node " << nodeId << ": DSDV freeze will trigger at " 
+                    << finalDsdvThreshold << " unique destinations";
+            if (dsdvFreezeUniqueCount == -1) {
+                EV_WARN << " (DISABLED via dsdvFreezeUniqueCount=-1)";
+            } else if (dsdvFreezeUniqueCount > 0) {
+                EV_WARN << " (explicit override via dsdvFreezeUniqueCount parameter)";
+            } else {
+                EV_WARN << " (auto-calculated: total=" << (numberOfNodes + numberOfEndNodes + numRescueNodes) << " - self)";
+            }
+            EV_WARN << " <<<<<<" << endl;
 
             // CRITICAL: Add self to changedSet so it gets advertised immediately
             // Without this, nodes won't advertise themselves until first full-dump (120s)
@@ -1152,7 +1182,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
     // If global convergence reached, stop routing immediately in all nodes
     if (globalConvergedFired) {
+        EV_INFO << "Node " << nodeId << ": global convergence reached, deleting routing self-message" << endl;
         routingPacketsDue = false;
+        if (useDSDV) {
+            dsdvPacketDue = false;
+        }
+        delete msg;
+        return;
     }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
@@ -1231,25 +1267,31 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
         // Send DSDV routing packet
         if (sendDsdv) {
-            txDuration = sendDSDVRoutingPacket(dsdvSendFullDump);
-            dsdvPacketDue = false;
-            
-            if (dsdvSendFullDump) {
-                changedSet.clear(); // full dump includes everything
+            // Double-check: if routing is frozen, skip sending
+            if (routingFrozen) {
+                EV_INFO << "[DSDV-FREEZE] Node " << nodeId << " skipping DSDV packet send (frozen)" << endl;
+                dsdvPacketDue = false;
             } else {
-                changedSet.clear(); // incremental update sent
+                txDuration = sendDSDVRoutingPacket(dsdvSendFullDump);
+                dsdvPacketDue = false;
+                
+                if (dsdvSendFullDump) {
+                    changedSet.clear(); // full dump includes everything
+                } else {
+                    changedSet.clear(); // incremental update sent
+                }
+                
+                if (enforceDutyCycle) {
+                    dutyCycleEnd = simTime() + txDuration/dutyCycle;
+                    nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl()/dutyCycle);
+                }
+                else {
+                    nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl());
+                }
+                
+                // Update nextScheduleTime to account for this transmission
+                nextScheduleTime = std::max(nextScheduleTime.dbl(), simTime().dbl() + txDuration.dbl());
             }
-            
-            if (enforceDutyCycle) {
-                dutyCycleEnd = simTime() + txDuration/dutyCycle;
-                nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl()/dutyCycle);
-            }
-            else {
-                nextDsdvPacketTransmissionTime = simTime() + std::max(0.5, txDuration.dbl());
-            }
-            
-            // Update nextScheduleTime to account for this transmission
-            nextScheduleTime = std::max(nextScheduleTime.dbl(), simTime().dbl() + txDuration.dbl());
         }
         // Send routing packet
         else if (sendRouting) {
@@ -1478,6 +1520,12 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
         if (useDSDV) {
             int sender = packet->getSource();
             
+            // If routing table is frozen, ignore all incoming routing packets
+            if (routingFrozen) {
+                EV_INFO << "[DSDV] Node " << nodeId << " routing table frozen, ignoring packet from " << sender << endl;
+                return;
+            }
+            
             EV_INFO << "[DSDV] Received routing packet from node " << sender 
                     << " with " << packet->getRoutingTableArraySize() << " routes" << endl;
 
@@ -1590,16 +1638,83 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
             routingTableSize.collect(singleMetricRoutingTable.size());
             logRoutingSnapshot("dsdv_packet_processed");
             
+            // DSDV FREEZE CHECK: Count unique destinations and freeze if threshold reached
+            if (firstTimeReached16 < SIMTIME_ZERO && !routingFrozen) {
+                std::set<int> uniqueIds;
+                for (const auto &r : singleMetricRoutingTable) {
+                    if (r.isValid) uniqueIds.insert(r.id);  // Only count valid routes
+                }
+                int uniqueCount = (int)uniqueIds.size();
+                
+                // -1 = disabled, > 0 = explicit, 0 = auto
+                int dsdvThreshold = (dsdvFreezeUniqueCount == -1) ? -1 : ((dsdvFreezeUniqueCount > 0) ? dsdvFreezeUniqueCount : expectedUniqueDestinations);
+                EV_INFO << "[DSDV_FREEZE_CHECK] Node " << nodeId << ": uniqueCount=" << uniqueCount 
+                        << " dsdvThreshold=" << dsdvThreshold << " (dsdvFreezeUniqueCount=" 
+                        << dsdvFreezeUniqueCount << ", expectedUniqueDestinations=" 
+                        << expectedUniqueDestinations << ")" << endl;
+                
+                if (dsdvThreshold > 0 && uniqueCount >= dsdvThreshold) {
+                    firstTimeReached16 = simTime();
+                    routingFrozen = true;
+                    routingFrozenTime = simTime();
+                    EV_WARN << ">>>>>>> Node " << nodeId << ": ROUTING TABLE FROZEN at t=" << simTime() 
+                            << " with " << uniqueCount << "/" << dsdvThreshold << " unique destinations";
+                    if (dsdvFreezeUniqueCount > 0) {
+                        EV_WARN << " (explicit threshold)";
+                    } else {
+                        EV_WARN << " (auto-calculated)";
+                    }
+                    EV_WARN << " <<<<<<<" << endl;
+                    
+                    // Stop DSDV timers to prevent further routing updates
+                    if (dsdvIncrementalTimer && dsdvIncrementalTimer->isScheduled()) {
+                        cancelEvent(dsdvIncrementalTimer);
+                        EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " cancelled incremental timer" << endl;
+                    }
+                    if (dsdvFullTimer && dsdvFullTimer->isScheduled()) {
+                        cancelEvent(dsdvFullTimer);
+                        EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " cancelled full update timer" << endl;
+                    }
+                    
+                    // Log to convergence CSV
+                    if (!convergenceCsvReady) {
+#ifdef _WIN32
+                        const char sep = '\\';
+#else
+                        const char sep = '/';
+#endif
+                        std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+                        _mkdir(folder.c_str());
+#else
+                        mkdir(folder.c_str(), 0775);
+#endif
+                        std::stringstream css; css << folder << sep << "routing_convergence.csv";
+                        convergenceCsvPath = css.str();
+                        std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                        if (cf.is_open()) {
+                            if (cf.tellp() == 0) {
+                                cf << "simTime,event,nodeId,threshold,uniqueCount" << std::endl;
+                            }
+                            cf.close();
+                            convergenceCsvReady = true;
+                        }
+                    }
+                    if (convergenceCsvReady) {
+                        std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                        if (cf.is_open()) {
+                            cf << simTime() << ",DSDV_FREEZE," << nodeId << "," << dsdvThreshold << "," << uniqueCount << std::endl;
+                            cf.close();
+                        }
+                    }
+                    
+                    // Announce convergence and check for global stop
+                    announceLocalConvergenceIfNeeded(uniqueCount);
+                    tryStopRoutingGlobally();
+                }
+            }
+            
             return; // DSDV processing complete
-        }
-
-        // ========================================================================
-        // LEGACY ROUTING PROTOCOL PROCESSING (unchanged)
-        // ========================================================================
-
-        // If routing is frozen, we still count the packet but ignore any table modifications
-        if (routingFrozen) {
-            return; // tables remain stable
         }
 
     sanitizeRoutingTable();
@@ -1899,7 +2014,10 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
 // Policy: lower metric is better; if equal, keep the one with latest validity time; if still equal, prefer existing.
 void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRoute &candidate) {
     // If routing already frozen, ignore any new candidate to keep table stable
-    if (routingFrozen) return;
+    if (routingFrozen) {
+        EV_INFO << "Node " << nodeId << ": routing table frozen, ignoring new route to " << candidate.id << endl;
+        return;
+    }
     // Make a safe copy because we'll potentially erase from the vector
     LoRaNodeApp::singleMetricRoute cand = candidate;
     // Find all entries for this destination id
@@ -1936,20 +2054,87 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
             if (it->id == cand.id) it = singleMetricRoutingTable.erase(it); else ++it;
         }
         singleMetricRoutingTable.push_back(cand);
+        EV_INFO << "[ROUTE_ADD] Node " << nodeId << " added/updated route to dest=" << cand.id 
+                << " via=" << cand.via << " metric=" << cand.metric << " (table size: " 
+                << singleMetricRoutingTable.size() << ")" << endl;
     } else {
         // Candidate is worse; if there is no entry for this destination yet, insert it, else ignore
         if (bestIdx == -1) {
             singleMetricRoutingTable.push_back(cand);
+            EV_INFO << "[ROUTE_ADD] Node " << nodeId << " added first route to dest=" << cand.id 
+                    << " via=" << cand.via << " metric=" << cand.metric << " (table size: " 
+                    << singleMetricRoutingTable.size() << ")" << endl;
             // Now reduce to one (candidate is the only one)
         }
         // else do nothing (keep the existing best)
     }
 
-    // After any insertion, check if we just reached threshold unique destinations (default 16)
-    if (firstTimeReached16 < SIMTIME_ZERO) {
+    // After any insertion, count unique destinations for convergence/freeze check
+    if (firstTimeReached16 < SIMTIME_ZERO && !routingFrozen) {
         std::set<int> uniqueIds;
         for (const auto &r : singleMetricRoutingTable) uniqueIds.insert(r.id);
-        if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
+        int uniqueCount = (int)uniqueIds.size();
+        
+        // For DSDV: freeze when we have routes to threshold number of nodes
+        // -1 = disabled, >0 = explicit, 0 = auto-calculated
+        if (useDSDV) {
+            int dsdvThreshold = (dsdvFreezeUniqueCount == -1) ? -1 : ((dsdvFreezeUniqueCount > 0) ? dsdvFreezeUniqueCount : expectedUniqueDestinations);
+            EV_INFO << "[DSDV_FREEZE_CHECK] Node " << nodeId << ": uniqueCount=" << uniqueCount 
+                    << " dsdvThreshold=" << dsdvThreshold << " (dsdvFreezeUniqueCount=" 
+                    << dsdvFreezeUniqueCount << ", expectedUniqueDestinations=" 
+                    << expectedUniqueDestinations << ")" << endl;
+            if (dsdvThreshold > 0 && uniqueCount >= dsdvThreshold) {
+            firstTimeReached16 = simTime();
+            routingFrozen = true;
+            routingFrozenTime = simTime();
+            EV_WARN << ">>>>>> Node " << nodeId << ": ROUTING TABLE FROZEN at t=" << simTime() 
+                    << " with " << uniqueCount << "/" << dsdvThreshold << " unique destinations";
+            if (dsdvFreezeUniqueCount > 0) {
+                EV_WARN << " (explicit threshold)";
+            } else {
+                EV_WARN << " (auto-calculated)";
+            }
+            EV_WARN << " <<<<<<" << endl;
+            
+            // Log to convergence CSV
+            if (!convergenceCsvReady) {
+#ifdef _WIN32
+                const char sep = '\\';
+#else
+                const char sep = '/';
+#endif
+                std::string folder = std::string("delivered_packets");
+#ifdef _WIN32
+                _mkdir(folder.c_str());
+#else
+                mkdir(folder.c_str(), 0775);
+#endif
+                std::stringstream css; css << folder << sep << "routing_convergence.csv";
+                convergenceCsvPath = css.str();
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    if (cf.tellp() == 0) {
+                        cf << "simTime,event,nodeId,threshold,uniqueCount" << std::endl;
+                    }
+                    cf.close();
+                    convergenceCsvReady = true;
+                }
+            }
+            if (convergenceCsvReady) {
+                std::ofstream cf(convergenceCsvPath, std::ios::out | std::ios::app);
+                if (cf.is_open()) {
+                    cf << simTime() << ",DSDV_FREEZE," << nodeId << "," << dsdvThreshold << "," << uniqueCount << std::endl;
+                    cf.close();
+                }
+            }
+            
+            // Announce convergence and check for global stop
+            announceLocalConvergenceIfNeeded(uniqueCount);
+            tryStopRoutingGlobally();
+            }
+        }
+        // Legacy threshold check (for non-DSDV or when expectedUniqueDestinations not set)
+        else if ((int)uniqueIds.size() >= routingFreezeUniqueCount) {
             firstTimeReached16 = simTime();
             // Lazy-open convergence CSV (node 0 creates header, others append)
             if (!convergenceCsvReady) {
@@ -2023,8 +2208,14 @@ void LoRaNodeApp::addOrReplaceBestSingleRoute(const LoRaNodeApp::singleMetricRou
 // When this node reaches threshold the first time, bump the global counter and log
 void LoRaNodeApp::announceLocalConvergenceIfNeeded(int uniqueCount) {
     // End nodes (iAmEnd=true) do not contribute to the global convergence count
-    if (isEndNodeHost(this)) return;
-    if (locallyConverged) return;
+    if (isEndNodeHost(this)) {
+        EV_INFO << "Node " << nodeId << " is end node, not contributing to global convergence count" << endl;
+        return;
+    }
+    if (locallyConverged) {
+        EV_INFO << "Node " << nodeId << " already announced local convergence" << endl;
+        return;
+    }
     locallyConverged = true;
     // Increase shared count
     globalNodesConverged++;
@@ -2039,14 +2230,31 @@ void LoRaNodeApp::announceLocalConvergenceIfNeeded(int uniqueCount) {
 
 // If all nodes are converged, stop routing packets across the network
 void LoRaNodeApp::tryStopRoutingGlobally() {
-    if (!stopRoutingWhenAllConverged) return;
-    if (globalConvergedFired) return;
-    if (globalNodesExpectingConvergence <= 0) return; // nothing to do
-    if (globalNodesConverged < globalNodesExpectingConvergence) return;
+    if (!stopRoutingWhenAllConverged) {
+        return;
+    }
+    if (globalConvergedFired) {
+        return;
+    }
+    if (globalNodesExpectingConvergence <= 0) {
+        return; // nothing to do
+    }
+    if (globalNodesConverged < globalNodesExpectingConvergence) {
+        EV_INFO << "Global convergence progress: " << globalNodesConverged << "/" 
+                << globalNodesExpectingConvergence << " nodes converged" << endl;
+        return;
+    }
     // Fire once
     globalConvergedFired = true;
+    EV_WARN << ">>>>>> GLOBAL ROUTING CONVERGENCE REACHED at t=" << simTime() 
+            << " - All " << globalNodesExpectingConvergence << " nodes have frozen routing tables <<<<<<" << endl;
     // Broadcast-style stop: each node will see this condition independently; we set routingPacketsDue=false locally
     routingPacketsDue = false;
+    // Also stop DSDV-specific routing
+    if (useDSDV) {
+        dsdvPacketDue = false;
+        EV_WARN << ">>>>>> Node " << nodeId << ": DSDV routing packets STOPPED globally <<<<<<" << endl;
+    }
     // Also log a GLOBAL_CONVERGED event
     if (globalConvergenceCsvReady) {
         std::ofstream gf(globalConvergenceCsvPath, std::ios::out | std::ios::app);

@@ -123,6 +123,9 @@ simple LoRaNodeApp
         // Full-dump fragmentation behavior
         bool dsdvUseChunking = default(true); // true: chunked full-dumps; false: bounded subset per period
         int dsdvMaxEntriesPerPacket = default(10);
+        // DSDV freeze feature: freeze DSDV table updates after reaching threshold of unique destinations
+        // (-1 = auto-calculate based on total nodes)
+        int dsdvFreezeUniqueCount = default(-1);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

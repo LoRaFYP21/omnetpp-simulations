@@ -345,14 +345,16 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     bool pathLogReady = false;
     std::string pathLogFile; // delivered_packets/paths.csv
 
-    // Convergence instrumentation: time when singleMetricRoutingTable first reaches 16 entries
-    simtime_t firstTimeReached16 = -1; // -1 indicates not yet reached
+    // Convergence instrumentation: time when singleMetricRoutingTable first reaches threshold
+    simtime_t firstTimeReached16 = -1; // -1 indicates not yet reached (legacy name kept)
     bool convergenceCsvReady = false;
     std::string convergenceCsvPath; // delivered_packets/routing_convergence.csv
 
     // Routing freeze feature
     bool freezeRoutingAtThreshold = false;        // parameter value
-    int routingFreezeUniqueCount = 16;            // parameter value
+    int routingFreezeUniqueCount = 16;            // parameter value (legacy protocols)
+    int expectedUniqueDestinations = -1;          // calculated: total nodes - self (for DSDV freeze)
+    int dsdvFreezeUniqueCount = -1;               // parameter: DSDV freeze threshold (-1 = auto-calculate)
     bool routingFrozen = false;                   // becomes true once threshold reached (if feature enabled)
     simtime_t routingFrozenTime = -1;             // when frozen
     simtime_t freezeValidityHorizon = 0;          // horizon added to simTime when freezing routes

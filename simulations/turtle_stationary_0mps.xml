@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Stationary Turtle Mobility Script for Rescue Node
+- Keeps the node at its configured initial position using minimal speed and wait commands.
+
+Usage: set in your INI:
+  **.loRaRescueNodes[*].mobility.turtleScript = xmldoc("turtle_stationary_0mps.xml")
+-->
+<movement>
+    <!-- Set minimal speed (TurtleMobility requires speed > 0) -->
+    <set speed="0.001"/>
+
+    <!-- Infinite loop: wait indefinitely to keep node stationary -->
+    <repeat n="0">
+        <wait t="1000000"/>
+    </repeat>
+</movement>
