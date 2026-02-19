@@ -482,15 +482,33 @@ void LoRaNodeApp::initialize(int stage) {
             EV_INFO << "[DSDV] Added self-route: dest=" << nodeId 
                     << " metric=0 seqNum=" << ownSeqNum << endl;
 
+            // Read destination filtering parameter FIRST (needed for convergence calculation)
+            if (hasPar("dsdvFilterRelayDestinations")) {
+                dsdvFilterRelayDestinations = par("dsdvFilterRelayDestinations").boolValue();
+            }
+            EV_INFO << "[DSDV] Node " << nodeId << " dsdvFilterRelayDestinations=" << dsdvFilterRelayDestinations << endl;
+
             // Calculate expected unique destinations for DSDV freeze:
-            // Total nodes = relay nodes + end nodes + rescue nodes - self
+            // When filtering enabled: only count end/rescue nodes (relay routers excluded from tables)
+            // When filtering disabled: count all nodes (relay + end + rescue - self)
             int numRescueNodes = hasPar("numberOfRescueNodes") ? par("numberOfRescueNodes").intValue() : 1;
-            expectedUniqueDestinations = numberOfNodes + numberOfEndNodes + numRescueNodes - 1;
-            
-            // Debug logging to verify parameter values
-            EV_WARN << ">>>>>> Node " << nodeId << " DSDV freeze calculation: numberOfNodes=" << numberOfNodes
-                    << " numberOfEndNodes=" << numberOfEndNodes << " numRescueNodes=" << numRescueNodes
-                    << " expectedUnique=" << expectedUniqueDestinations << " <<<<<<" << endl;
+            if (dsdvFilterRelayDestinations) {
+                // Filtered mode: only end/rescue nodes are destinations
+                expectedUniqueDestinations = numberOfEndNodes + numRescueNodes;
+                EV_WARN << ">>>>>> Node " << nodeId << " DSDV freeze calculation (FILTERED mode): "
+                        << "numberOfEndNodes=" << numberOfEndNodes 
+                        << " + numRescueNodes=" << numRescueNodes
+                        << " = expectedUnique=" << expectedUniqueDestinations 
+                        << " (relay routers excluded) <<<<<<" << endl;
+            } else {
+                // Normal mode: all nodes minus self
+                expectedUniqueDestinations = numberOfNodes + numberOfEndNodes + numRescueNodes - 1;
+                EV_WARN << ">>>>>> Node " << nodeId << " DSDV freeze calculation (NORMAL mode): "
+                        << "numberOfNodes=" << numberOfNodes
+                        << " + numberOfEndNodes=" << numberOfEndNodes 
+                        << " + numRescueNodes=" << numRescueNodes
+                        << " - 1 = expectedUnique=" << expectedUniqueDestinations << " <<<<<<" << endl;
+            }
             
             // Read optional DSDV freeze threshold parameter
             // If set (>0), use explicit value; otherwise use auto-calculated expectedUniqueDestinations
@@ -508,7 +526,12 @@ void LoRaNodeApp::initialize(int stage) {
             } else if (dsdvFreezeUniqueCount > 0) {
                 EV_WARN << " (explicit override via dsdvFreezeUniqueCount parameter)";
             } else {
-                EV_WARN << " (auto-calculated: total=" << (numberOfNodes + numberOfEndNodes + numRescueNodes) << " - self)";
+                if (dsdvFilterRelayDestinations) {
+                    EV_WARN << " (auto-calculated [FILTERED]: " << numberOfEndNodes << " end + " 
+                            << numRescueNodes << " rescue = " << expectedUniqueDestinations << ")";
+                } else {
+                    EV_WARN << " (auto-calculated [NORMAL]: total=" << (numberOfNodes + numberOfEndNodes + numRescueNodes) << " - self)";
+                }
             }
             EV_WARN << " <<<<<<" << endl;
 
@@ -1537,6 +1560,13 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                 int receivedMetric = receivedRoute.getPriMetric();
                 int receivedFlags = receivedRoute.getFlags();
                 bool isUnreachable = (receivedFlags & 1); // flag bit 0 indicates invalid/unreachable
+
+                // DSDV DESTINATION FILTERING: Skip relay routers if filtering enabled
+                if (shouldFilterDestination(destId)) {
+                    EV_DETAIL << "[DSDV-FILTER] Skipping route to relay router " << destId 
+                              << " (destination filtering enabled)" << endl;
+                    continue;
+                }
 
                 // Skip self routes
                 if (destId == nodeId) {
@@ -3323,19 +3353,35 @@ simtime_t LoRaNodeApp::sendDSDVRoutingPacket(bool fullDump) {
     // Increment own sequence number before advertising (destination freshness)
     ownSeqNum++;
 
-    // Always include self-route with our own sequence number
-    LoRaRoute selfRoute;
-    selfRoute.setId(nodeId);
-    selfRoute.setPriMetric(0);
-    selfRoute.setSeqNum(ownSeqNum);
-    selfRoute.setFlags(0); // valid
-    routesToAdvertise.push_back(selfRoute);
+    // STEP 4: Self-route advertisement with destination filtering
+    // Always include self-route UNLESS we are a relay router and filtering is enabled
+    bool shouldAdvertiseSelf = true;
+    if (dsdvFilterRelayDestinations && nodeId < 1000) {
+        // This is a relay router and filtering is enabled - don't advertise self
+        shouldAdvertiseSelf = false;
+        EV_INFO << "[DSDV-FILTER] Relay router " << nodeId << " skipping self-route advertisement (filtering enabled)" << endl;
+    }
+    
+    if (shouldAdvertiseSelf) {
+        LoRaRoute selfRoute;
+        selfRoute.setId(nodeId);
+        selfRoute.setPriMetric(0);
+        selfRoute.setSeqNum(ownSeqNum);
+        selfRoute.setFlags(0); // valid
+        routesToAdvertise.push_back(selfRoute);
+    }
 
     if (fullDump) {
-        // Full dump: advertise all valid routes in routing table
+        // STEP 3a: Full dump with destination filtering
         EV_INFO << "[DSDV] Preparing full dump with " << singleMetricRoutingTable.size() << " routes" << endl;
         for (const auto &rt : singleMetricRoutingTable) {
             if (rt.id != nodeId) { // skip self (already added)
+                // STEP 3a: Apply destination filtering
+                if (shouldFilterDestination(rt.id)) {
+                    EV_DETAIL << "[DSDV-FILTER] Skipping relay router " << rt.id << " in full dump" << endl;
+                    continue;
+                }
+                
                 LoRaRoute route;
                 route.setId(rt.id);
                 route.setPriMetric(rt.metric);
@@ -3345,10 +3391,16 @@ simtime_t LoRaNodeApp::sendDSDVRoutingPacket(bool fullDump) {
             }
         }
     } else {
-        // Incremental: advertise only changed routes
+        // STEP 3b: Incremental with destination filtering
         EV_INFO << "[DSDV] Preparing incremental update with " << changedSet.size() << " changed routes" << endl;
         for (int destId : changedSet) {
             if (destId == nodeId) continue; // self already added
+            
+            // STEP 3b: Apply destination filtering
+            if (shouldFilterDestination(destId)) {
+                EV_DETAIL << "[DSDV-FILTER] Skipping relay router " << destId << " in incremental update" << endl;
+                continue;
+            }
             
             // Find route in routing table
             int idx = getBestRouteIndexTo(destId);
@@ -3748,6 +3800,26 @@ bool LoRaNodeApp::isDataPacketForMeUnique(cMessage *msg) {
         }
     }
     return true;
+}
+
+// Helper function: check if destination should be filtered from DSDV routing table
+// Returns true if destId should be filtered (not stored/advertised)
+// Returns false if destId should be processed normally
+bool LoRaNodeApp::shouldFilterDestination(int destId) {
+    // If filtering is disabled, don't filter anything
+    if (!dsdvFilterRelayDestinations) {
+        return false;
+    }
+    
+    // Filter relay routers (ID 0-999): return true to skip them
+    // Keep end nodes (ID 1000+) and rescue nodes (ID 2000+): return false to process them
+    if (destId < 1000) {
+        // Relay router - filter it
+        return true;
+    }
+    
+    // End or rescue node - don't filter
+    return false;
 }
 
 int LoRaNodeApp::pickCADSF() {

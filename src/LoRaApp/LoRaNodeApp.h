@@ -62,6 +62,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         virtual bool isPacketForwarded(cMessage *msg);
         virtual bool isPacketToBeForwarded(cMessage *msg);
         virtual bool isDataPacketForMeUnique(cMessage *msg);
+        virtual bool shouldFilterDestination(int destId);
 
         void handleMessageFromLowerLayer(cMessage *msg);
         void handleSelfMessage(cMessage *msg);
@@ -355,6 +356,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     int routingFreezeUniqueCount = 16;            // parameter value (legacy protocols)
     int expectedUniqueDestinations = -1;          // calculated: total nodes - self (for DSDV freeze)
     int dsdvFreezeUniqueCount = -1;               // parameter: DSDV freeze threshold (-1 = auto-calculate)
+    bool dsdvFilterRelayDestinations = false;     // parameter: if true, only store/advertise end/rescue node routes
     bool routingFrozen = false;                   // becomes true once threshold reached (if feature enabled)
     simtime_t routingFrozenTime = -1;             // when frozen
     simtime_t freezeValidityHorizon = 0;          // horizon added to simTime when freezing routes

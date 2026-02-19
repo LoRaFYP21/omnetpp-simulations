@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
 Turtle Mobility Script for Rescue Node - 7km Square Patrol
-- Speed: 10 m/s
+- Speed: 7 m/s
 - Starting position: FIXED at (1500, 8500) - top left corner
 - Pattern: 7000m square clockwise patrol
 -->
@@ -9,8 +9,8 @@ Turtle Mobility Script for Rescue Node - 7km Square Patrol
     <!-- CRITICAL: Set fixed starting position at top left corner -->
     <set x="1500" y="1500"/>
     
-    <!-- Set constant speed of 10 m/s -->
-    <set speed="10"/>
+    <!-- Set constant speed of 7 m/s -->
+    <set speed="7"/>
 
     <!-- Square patrol pattern: 2000m x 2000m - repeat indefinitely -->
     <repeat count="0">
@@ -35,4 +35,3 @@ Turtle Mobility Script for Rescue Node - 7km Square Patrol
         <turn angle="90"/>
     </repeat>
 </movement>
-
