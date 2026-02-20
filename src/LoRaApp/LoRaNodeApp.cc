@@ -1142,6 +1142,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     if (useDSDV) {
         if (msg == dsdvIncrementalTimer) {
             EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " ENTERING dsdvIncrementalTimer handler at t=" << simTime() << endl;
+            
+            // Safety check: if global convergence already reached, don't process timer
+            if (globalConvergedFired) {
+                EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " ignoring dsdvIncrementalTimer after global convergence" << endl;
+                return;
+            }
+            
             EV_INFO << "[DSDV] Incremental update timer fired at " << simTime() << endl;
             
             // Set flag to send incremental update when MAC is ready
@@ -1176,6 +1183,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         }
         if (msg == dsdvFullTimer) {
             EV_WARN << "[DEBUG-TIMER] Node " << nodeId << " ENTERING dsdvFullTimer handler at t=" << simTime() << endl;
+            
+            // Safety check: if global convergence already reached, don't process timer
+            if (globalConvergedFired) {
+                EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " ignoring dsdvFullTimer after global convergence" << endl;
+                return;
+            }
+            
             EV_INFO << "[DSDV] Full update timer fired at " << simTime() << endl;
             
             // Set flag to send full-dump update when MAC is ready
@@ -2284,6 +2298,16 @@ void LoRaNodeApp::tryStopRoutingGlobally() {
     if (useDSDV) {
         dsdvPacketDue = false;
         EV_WARN << ">>>>>> Node " << nodeId << ": DSDV routing packets STOPPED globally <<<<<<" << endl;
+        
+        // CRITICAL FIX: Cancel scheduled DSDV timers to prevent crash
+        if (dsdvIncrementalTimer && dsdvIncrementalTimer->isScheduled()) {
+            EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " cancelling scheduled dsdvIncrementalTimer" << endl;
+            cancelEvent(dsdvIncrementalTimer);
+        }
+        if (dsdvFullTimer && dsdvFullTimer->isScheduled()) {
+            EV_WARN << "[DSDV-FREEZE] Node " << nodeId << " cancelling scheduled dsdvFullTimer" << endl;
+            cancelEvent(dsdvFullTimer);
+        }
     }
     // Also log a GLOBAL_CONVERGED event
     if (globalConvergenceCsvReady) {
