@@ -204,6 +204,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         bool dataPacketsDue;
         bool forwardPacketsDue;
         bool routingPacketsDue;
+        bool globalConvergenceHandled;  // Flag to track if this node has already handled global convergence
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;

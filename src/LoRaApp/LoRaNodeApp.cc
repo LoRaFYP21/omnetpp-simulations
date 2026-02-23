@@ -308,6 +308,7 @@ void LoRaNodeApp::initialize(int stage) {
         dataPacketsDue = false;
         forwardPacketsDue = false;
         routingPacketsDue = false;
+        globalConvergenceHandled = false;
 
         sendPacketsContinuously = par("sendPacketsContinuously");
         onlyNode0SendsPackets = par("onlyNode0SendsPackets");
@@ -822,7 +823,10 @@ void LoRaNodeApp::initialize(int stage) {
         if (LoRaPacketsToSend.size() > 0) {
                     dataPacketsDue = true;
                     nextDataPacketTransmissionTime = timeToFirstDataPacket;
-                    EV << "Time to first data packet: " << timeToFirstDataPacket << endl;
+                    EV_INFO << "[DATA-DEBUG] Node " << nodeId << ": " << LoRaPacketsToSend.size() 
+                            << " data packets generated, first scheduled at t=" << timeToFirstDataPacket << endl;
+        } else {
+                    EV_INFO << "[DATA-DEBUG] Node " << nodeId << ": no data packets to send" << endl;
         }
 
         // Forward packets timer (enforce minimum start delay of 5s)
@@ -841,7 +845,7 @@ void LoRaNodeApp::initialize(int stage) {
 
         selfPacket = new cMessage("selfPacket");
         selfPacket->setSchedulingPriority(-10);  // High priority: processed before mobility events (default priority is 0)
-        EV_INFO << "selfPacket vinuja" <<endl;
+        EV_WARN << "[SELFPACKET-INIT] Node " << nodeId << " created selfPacket at t=" << simTime() << endl;
         // Failure scheduling parameters (local + optional global subset override)
         timeToFailureParam = par("timeToFailure");
         failureJitterFracParam = par("failureJitterFrac");
@@ -878,32 +882,40 @@ void LoRaNodeApp::initialize(int stage) {
             // Only data packet due
             if (dataPacketsDue && !forwardPacketsDue && !routingPacketsDue) {
                 scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
-                EV << "Self packet triggered by due data packet" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstDataPacket) << " (data packet only)" << endl;
             }
             // Only forward packet due
             else if (routingPacketsDue && !dataPacketsDue && !forwardPacketsDue) {
                 scheduleAt(simTime() + timeToFirstRoutingPacket, selfPacket);
-                EV << "Self packet triggered by due routing packet" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstRoutingPacket) << " (routing packet only)" << endl;
             }
             // Only routing packet due
             else if (forwardPacketsDue && !dataPacketsDue && !routingPacketsDue) {
                 scheduleAt(simTime() + timeToFirstForwardPacket, selfPacket);
-                EV << "Self packet triggered by due forward packet" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstForwardPacket) << " (forward packet only)" << endl;
             }
             // Data packet due earlier
             else if (timeToFirstDataPacket < timeToFirstForwardPacket && timeToFirstDataPacket < timeToFirstRoutingPacket ) {
                 scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
-                EV << "Self packet triggered by due data packet before other due packets" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstDataPacket) << " (data packet earliest)" << endl;
             }
             // Forward packet due earlier
                 else if (timeToFirstForwardPacket < timeToFirstDataPacket && timeToFirstForwardPacket < timeToFirstRoutingPacket ) {
                 scheduleAt(simTime() + timeToFirstForwardPacket, selfPacket);
-                EV << "Self packet triggered by due forward packet before other due packets" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstForwardPacket) << " (forward packet earliest)" << endl;
             }
             else {
                 scheduleAt(simTime() + timeToFirstRoutingPacket, selfPacket);
-                EV << "Self packet triggered by due routing packet before other due packets" << endl;
+                EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": selfPacket scheduled for t=" 
+                        << (simTime() + timeToFirstRoutingPacket) << " (routing packet earliest)" << endl;
             }
+        } else {
+            EV_INFO << "[INIT-SCHEDULE] Node " << nodeId << ": NO selfPacket scheduled (no packets due)" << endl;
         }
 
         dutyCycleEnd = simTime();
@@ -1217,26 +1229,73 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         }
     }
 
-    // If global convergence reached, stop routing immediately in all nodes
-    if (globalConvergedFired) {
-        EV_INFO << "Node " << nodeId << ": global convergence reached, deleting routing self-message" << endl;
+    // If global convergence reached, stop routing beacons but continue data/forward packets
+    // Only handle this ONCE per node to avoid infinite rescheduling loop
+    if (globalConvergedFired && !globalConvergenceHandled) {
+        EV_INFO << "[CONVERGENCE-DEBUG] Node " << nodeId << " at t=" << simTime() 
+                << ": global convergence reached, stopping routing beacons" << endl;
+        EV_INFO << "[CONVERGENCE-DEBUG] Node " << nodeId << " state: dataPacketsDue=" << dataPacketsDue 
+                << ", forwardPacketsDue=" << forwardPacketsDue 
+                << ", routingPacketsDue=" << routingPacketsDue 
+                << ", dataQueueSize=" << LoRaPacketsToSend.size() 
+                << ", forwardQueueSize=" << LoRaPacketsToForward.size() << endl;
+        
+        // Mark that this node has handled convergence
+        globalConvergenceHandled = true;
+        
+        // Stop routing beacon transmissions
         routingPacketsDue = false;
         if (useDSDV) {
             dsdvPacketDue = false;
         }
-        delete msg;
-        return;
+        
+        // Don't delete selfPacket if data or forward packets remain - reschedule for those instead
+        if (dataPacketsDue || forwardPacketsDue || LoRaPacketsToSend.size() > 0 || LoRaPacketsToForward.size() > 0) {
+            // Update data/forward due flags based on queue contents
+            if (LoRaPacketsToSend.size() > 0) {
+                dataPacketsDue = true;
+            }
+            if (LoRaPacketsToForward.size() > 0) {
+                forwardPacketsDue = true;
+            }
+            
+            // Calculate next schedule time for data or forward packets
+            simtime_t nextScheduleTime = nextDataPacketTransmissionTime;
+            if (dataPacketsDue && forwardPacketsDue) {
+                nextScheduleTime = std::min(nextDataPacketTransmissionTime.dbl(), nextForwardPacketTransmissionTime.dbl());
+            } else if (forwardPacketsDue) {
+                nextScheduleTime = nextForwardPacketTransmissionTime;
+            }
+            
+            // Ensure schedule time is in the future
+            if (nextScheduleTime <= simTime()) {
+                nextScheduleTime = simTime() + 1.0;
+            }
+            
+            EV_INFO << "[CONVERGENCE-DEBUG] Node " << nodeId 
+                    << ": rescheduling selfPacket for data/forward at t=" << nextScheduleTime << endl;
+            scheduleAt(nextScheduleTime, msg);
+            return;
+        } else {
+            EV_WARN << "[SELFPACKET-DELETE] Node " << nodeId 
+                    << " DELETING selfPacket at t=" << simTime() 
+                    << " (no data/forward packets remain after convergence)" << endl;
+            delete msg;
+            selfPacket = nullptr;  // CRITICAL: Set to nullptr so we know to recreate it
+            return;
+        }
     }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
     LoRaMac *lrmc = (LoRaMac *)getParentModule()->getSubmodule("LoRaNic")->getSubmodule("mac");
     
-    // DEBUG: Log selfPacket processing for node 2000
-    if (nodeId == 2000) {
-        EV_WARN << "[DEBUG-SELFPACKET] Node 2000 processing selfPacket at t=" << simTime() 
-                << " MAC state=" << lrmc->fsm.getState() 
-                << " dsdvPacketDue=" << dsdvPacketDue << endl;
+    // DEBUG: Log ALL handleSelfMessage calls for relay and end nodes to trace execution
+    if (nodeId < 50 || nodeId >= 1000) {
+        EV_WARN << "[SELFPACKET-HANDLE] Node " << nodeId << " handleSelfMessage at t=" << simTime() 
+                << " MAC=" << lrmc->fsm.getState() 
+                << " dataQ=" << LoRaPacketsToSend.size()
+                << " fwdQ=" << LoRaPacketsToForward.size() << endl;
     }
     
     if (lrmc->fsm.getState() == IDLE ) {
@@ -1261,6 +1320,15 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             sendForward = true;
         }
 
+        // DEBUG: Log forward decision for nodes with queued packets
+        if (LoRaPacketsToForward.size() > 0) {
+            EV_WARN << "[FWD-DECISION] Node " << nodeId << " at t=" << simTime()
+                    << " forwardQueueSize=" << LoRaPacketsToForward.size()
+                    << " nextFwdTime=" << nextForwardPacketTransmissionTime
+                    << " timeDiff=" << (nextForwardPacketTransmissionTime - simTime()).dbl()
+                    << " sendForward=" << sendForward << endl;
+        }
+
         // Check if there are routing packets to send
         if ( routingPacketsDue && simTime() >= nextRoutingPacketTransmissionTime ) {
             sendRouting = true;
@@ -1269,6 +1337,15 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         // Check if there are DSDV packets to send
         if ( dsdvPacketDue && simTime() >= nextDsdvPacketTransmissionTime ) {
             sendDsdv = true;
+        }
+        
+        // DEBUG: Log packet decision state (for all nodes if any flag is true)
+        if (sendDsdv || sendData || sendForward || sendRouting) {
+            EV_INFO << "[PACKET-DECISION] Node " << nodeId << " at t=" << simTime() 
+                    << ": sendDsdv=" << sendDsdv << " sendData=" << sendData 
+                    << " sendForward=" << sendForward << " sendRouting=" << sendRouting 
+                    << " | dataQueue=" << LoRaPacketsToSend.size() 
+                    << " forwardQueue=" << LoRaPacketsToForward.size() << endl;
         }
         
         // DEBUG: Log packet decision for node 2000
@@ -1376,6 +1453,8 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             }
             // or send forward packet
             else {
+                EV_WARN << "[FWD-TX] Node " << nodeId << " at t=" << simTime()
+                        << " CALLING sendForwardPacket() with queue size=" << LoRaPacketsToForward.size() << endl;
                 txDuration = sendForwardPacket();
                 if (enforceDutyCycle) {
                     // Update duty cycle end
@@ -1425,7 +1504,14 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         // Schedule a self message to send routing, data or forward packets. Since some calculations lose precision, add an extra delay
         // (10x simtime-resolution unit) to avoid timing conflicts in the LoRaMac layer when simulations last very long.
         if (routingPacketsDue || dataPacketsDue || forwardPacketsDue || dsdvPacketDue) {
+            EV_INFO << "[RESCHEDULE-DEBUG] Node " << nodeId << " at t=" << simTime() 
+                    << ": scheduling selfPacket for t=" << (nextScheduleTime + 10*simTimeResolution) 
+                    << " | routingDue=" << routingPacketsDue << " dataDue=" << dataPacketsDue 
+                    << " forwardDue=" << forwardPacketsDue << " dsdvDue=" << dsdvPacketDue << endl;
             scheduleAt(nextScheduleTime + 10*simTimeResolution, selfPacket);
+        } else {
+            EV_INFO << "[RESCHEDULE-DEBUG] Node " << nodeId << " at t=" << simTime() 
+                    << ": NOT scheduling selfPacket (no packets due)" << endl;
         }
 
         if (!sendPacketsContinuously && routingPacketsDue) {
@@ -1454,6 +1540,13 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 
     // The LoRa radio was busy with a reception, so re-schedule the selfMessage a bit later
     else {
+        // DEBUG: Log when MAC is busy for relay/end nodes with forward queue
+        if ((nodeId < 50 || nodeId >= 1000) && LoRaPacketsToForward.size() > 0) {
+            EV_WARN << "[SELFPACKET-MAC-BUSY] Node " << nodeId << " at t=" << simTime() 
+                    << " MAC=" << lrmc->fsm.getState() 
+                    << " fwdQ=" << LoRaPacketsToForward.size() 
+                    << " rescheduling in 20us" << endl;
+        }
         // Instead of doing scheduling almost immediately: scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
         // wait 20 microseconds, which is approx. the transmission time for 1 bit (SF7, 125 kHz, 4:5)
         scheduleAt(simTime() + 0.00002, selfPacket);
@@ -1829,6 +1922,8 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                 break;
                         }
 
+                    newNeighbour.isValid = true;  // Initialize validity flag for legacy routing
+
                     if (storeBestRoutesOnly) {
                         addOrReplaceBestSingleRoute(newNeighbour);
                     } else {
@@ -1895,6 +1990,8 @@ void LoRaNodeApp::manageReceivedRoutingPacket(cMessage *msg) {
                                     + thisRoute.getPriMetric();
                                 break;
                             }
+
+                            newRoute.isValid = true;  // Initialize validity flag for legacy routing
 
                             if (storeBestRoutesOnly) {
                                 addOrReplaceBestSingleRoute(newRoute);
@@ -2607,20 +2704,45 @@ void LoRaNodeApp::manageReceivedAckPacketToForward(cMessage *msg) {
     if (newAckToForward) {
         forwardPacketsDue = true;
 
-        if (!selfPacket->isScheduled()) {
-            simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
-
-            if (enforceDutyCycle) {
-                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
-            }
-
-            if (!(nextScheduleTime > simTime())) {
-                nextScheduleTime = simTime() + 1;
-            }
-
-            scheduleAt(nextScheduleTime, selfPacket);
-            forwardPacketsDue = true;
+        // CRITICAL FIX: Update nextForwardPacketTransmissionTime to enable immediate forwarding
+        // Without this, relay nodes wait for timeToFirstForwardPacket (default 300s) before forwarding!
+        if (nextForwardPacketTransmissionTime > simTime()) {
+            nextForwardPacketTransmissionTime = simTime() + 0.1; // Allow forwarding very soon (100ms delay)
         }
+
+        // Recreate selfPacket if it was deleted by global convergence handler
+        if (!selfPacket) {
+            selfPacket = new cMessage("selfPacket");
+            selfPacket->setSchedulingPriority(-10);
+            EV_WARN << "[SELFPACKET-RECREATE] Node " << nodeId << " RECREATED selfPacket for ACK at t=" << simTime() << endl;
+        }
+
+        // CRITICAL FIX: If selfPacket is scheduled too far in the future (e.g., 1M seconds after convergence),
+        // cancel and reschedule it earlier to process forward packets promptly
+        simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
+        if (enforceDutyCycle) {
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+        }
+        if (!(nextScheduleTime > simTime())) {
+            nextScheduleTime = simTime() + 1;
+        }
+
+        if (selfPacket->isScheduled()) {
+            simtime_t scheduledTime = selfPacket->getArrivalTime();
+            if (scheduledTime > nextScheduleTime) {
+                EV_WARN << "[SELFPACKET-RESCHEDULE] Node " << nodeId << " CANCELING selfPacket scheduled for t="
+                        << scheduledTime << ", rescheduling for ACK at t=" << nextScheduleTime << endl;
+                cancelEvent(selfPacket);
+                scheduleAt(nextScheduleTime, selfPacket);
+            } else {
+                EV_WARN << "[SELFPACKET-SKIP] Node " << nodeId << " selfPacket already scheduled soon at t="
+                        << scheduledTime << " for ACK" << endl;
+            }
+        } else {
+            EV_WARN << "[SELFPACKET-SCHEDULE] Node " << nodeId << " scheduling selfPacket for ACK at t=" << nextScheduleTime << endl;
+            scheduleAt(nextScheduleTime, selfPacket);
+        }
+        forwardPacketsDue = true;
     }
 }
 
@@ -2705,20 +2827,52 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     if (newPacketToForward) {
         forwardPacketsDue = true;
 
-        if (!selfPacket->isScheduled()) {
-            simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
-
-            if (enforceDutyCycle) {
-                nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
-            }
-
-            if (! (nextScheduleTime > simTime()) ) {
-                nextScheduleTime = simTime() + 1;
-            }
-
-            scheduleAt(nextScheduleTime, selfPacket);
-            forwardPacketsDue = true;
+        // CRITICAL FIX: Update nextForwardPacketTransmissionTime to enable immediate forwarding
+        // Without this, relay nodes wait for timeToFirstForwardPacket (default 300s) before forwarding!
+        if (nextForwardPacketTransmissionTime > simTime()) {
+            nextForwardPacketTransmissionTime = simTime() + 0.1; // Allow forwarding very soon (100ms delay)
         }
+
+        // DEBUG: Log packet enqueue details
+        EV_WARN << "[FWD-DEBUG] Node " << nodeId << " ENQUEUED DATA packet at t=" << simTime()
+                << " src=" << packet->getSource() << " dst=" << packet->getDestination()
+                << " | forwardQueueSize=" << LoRaPacketsToForward.size()
+                << " nextFwdTime=" << nextForwardPacketTransmissionTime
+                << " selfScheduled=" << (selfPacket ? selfPacket->isScheduled() : false) << endl;
+
+        // Recreate selfPacket if it was deleted by global convergence handler
+        if (!selfPacket) {
+            selfPacket = new cMessage("selfPacket");
+            selfPacket->setSchedulingPriority(-10);
+            EV_WARN << "[SELFPACKET-RECREATE] Node " << nodeId << " RECREATED selfPacket for DATA at t=" << simTime() << endl;
+        }
+
+        // CRITICAL FIX: If selfPacket is scheduled too far in the future (e.g., 1M seconds after convergence),
+        // cancel and reschedule it earlier to process forward packets promptly
+        simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
+        if (enforceDutyCycle) {
+            nextScheduleTime = std::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+        }
+        if (! (nextScheduleTime > simTime()) ) {
+            nextScheduleTime = simTime() + 1;
+        }
+
+        if (selfPacket->isScheduled()) {
+            simtime_t scheduledTime = selfPacket->getArrivalTime();
+            if (scheduledTime > nextScheduleTime) {
+                EV_WARN << "[SELFPACKET-RESCHEDULE] Node " << nodeId << " CANCELING selfPacket scheduled for t="
+                        << scheduledTime << ", rescheduling for DATA at t=" << nextScheduleTime << endl;
+                cancelEvent(selfPacket);
+                scheduleAt(nextScheduleTime, selfPacket);
+            } else {
+                EV_WARN << "[SELFPACKET-SKIP] Node " << nodeId << " selfPacket already scheduled soon at t="
+                        << scheduledTime << " for DATA" << endl;
+            }
+        } else {
+            EV_WARN << "[SELFPACKET-SCHEDULE] Node " << nodeId << " scheduling selfPacket for DATA at t=" << nextScheduleTime << endl;
+            scheduleAt(nextScheduleTime, selfPacket);
+        }
+        forwardPacketsDue = true;
     }
 }
 
@@ -3125,6 +3279,17 @@ simtime_t LoRaNodeApp::sendForwardPacket() {
         sanitizeRoutingTable();
 
         int routeIndex = getBestRouteIndexTo(forwardPacket->getDestination());
+
+        // DEBUG: Log route lookup for ALL forwarding attempts
+        EV_WARN << "[FWD-ROUTE] Node " << nodeId << " forwarding: src=" << forwardPacket->getSource()
+                << " dst=" << forwardPacket->getDestination() << " routeIndex=" << routeIndex
+                << " routingMetric=" << routingMetric;
+        if (routeIndex >= 0) {
+            EV_WARN << " via=" << singleMetricRoutingTable[routeIndex].via
+                    << " metric=" << singleMetricRoutingTable[routeIndex].metric
+                    << " isValid=" << singleMetricRoutingTable[routeIndex].isValid;
+        }
+        EV_WARN << endl;
 
         // DEBUG: Log route lookup for DSDV debugging
         if (useDSDV && (forwardPacket->getSource() == 1000 || forwardPacket->getDestination() == 2000)) {
