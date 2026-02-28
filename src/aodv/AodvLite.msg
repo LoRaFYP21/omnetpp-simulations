@@ -21,7 +21,13 @@ packet Rrep {
 	int dstSeq;       // Destination sequence number (optional)
 	int hopCount;     // Hop count back to the originator
 	double lifetime;  // Route validity duration (seconds)
+	bool ackRequired = false;  // A-bit: requires RREP-ACK from next hop (RFC3561)
 	// Accumulated path of node IDs from destination back to origin (append per forward)
 	int path[];
+}
+
+packet RrepAck {
+	// RREP-ACK is a simple acknowledgment with no payload (RFC3561 Section 6.7)
+	// Just needs to identify which RREP is being acknowledged
 }
 

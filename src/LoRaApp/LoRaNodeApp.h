@@ -31,7 +31,7 @@
 #include "LoRaAppPacket_m.h"
 #include "LoRa/LoRaMacControlInfo_m.h"
 
-namespace aodv { class Rreq; class Rrep; }
+namespace aodv { class Rreq; class Rrep; class RrepAck; }
 
 using namespace omnetpp;
 
@@ -82,6 +82,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     simtime_t sendAodvPacket();
     void handleAodvRetryTimer(cMessage *msg);
     void scheduleAodvRetry(int destination);
+    // RREP-ACK helpers (RFC3561)
+    void handleRrepAck(cMessage *msg);
+    void sendRrepAck(int viaNode);
+    void handleRrepAckTimer(cMessage *msg);
+    void scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst);
+    void cancelRrepAckTimer(int nextHop, int origSrc, int finalDst);
+    bool isNodeBlacklisted(int nodeId);
+    void blacklistNode(int nodeId);
     // Log when an AODV RREQ reaches its destination (per-destination CSV)
     void logRreqAtDestination(const aodv::Rreq* rreq);
     // Unified RREP hop/path logger
@@ -104,6 +112,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
         void sendDownMgmtPacket();
         void generateDataPackets();
         void sanitizeRoutingTable();
+        void filterRoutesToEndNodes();
         int pickCADSF();
         int getBestRouteIndexTo(int destination);
         int getSFTo(int destination);
@@ -192,8 +201,29 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // AODV retry backoff and per-destination timers
     simtime_t aodvRreqBackoff;
     int aodvRreqMaxRetries;
+    simtime_t aodvRrepJitter;
     std::map<int,int> aodvRetryCount;           // destinationId -> retries
     std::map<int,cMessage*> aodvRetryTimers;    // destinationId -> timer message
+    
+    // RREP-ACK configuration and state (RFC3561)
+    bool aodvEnableRrepAck = false;             // Enable RREP-ACK mechanism (default: false)
+    int aodvMaxRrepRetries = 2;                 // MAX_RREP_RETRIES (default: 2)
+    simtime_t aodvRrepAckTimeout;               // Timeout for RREP-ACK (default: 100ms)
+    simtime_t aodvBlacklistTimeout;             // Duration to blacklist unresponsive nodes (default: 10s)
+    
+    // Pending RREP-ACK tracking structure
+    struct PendingRrepAck {
+        int nextHop;        // Node we're waiting ACK from
+        int origSrc;        // Original RREQ source
+        int finalDst;       // Final destination
+        int retryCount;     // Number of retransmission attempts
+        cMessage* timer;    // Timer for this pending ACK
+        LoRaAppPacket rrepCopy;  // Copy of RREP for retransmission
+    };
+    std::map<std::string, PendingRrepAck> aodvPendingRrepAcks;  // key = "nextHop_origSrc_finalDst"
+    
+    // Blacklisted nodes (unidirectional link detection)
+    std::map<int, simtime_t> aodvBlacklistedNodes;  // nodeId -> blacklist expiry time
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;
@@ -260,6 +290,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         //Node info
         int nodeId;
+        int originalNodeIndex;  // Store original index before offset
 
         std::vector<int> neighbourNodes;
         std::vector<int> knownNodes;

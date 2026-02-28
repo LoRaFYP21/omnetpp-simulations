@@ -9,6 +9,7 @@ import loranetwork.LoraNode.LoRaGW;
 import inet.node.inet.StandardHost;
 import inet.networklayer.configurator.ipv4.IPv4NetworkConfigurator;
 import inet.node.ethernet.Eth1G;
+import loranetwork.LoraNode.endRescueNode;
 
 @license(LGPL);
 network LoRaNetworkTest
@@ -16,9 +17,13 @@ network LoRaNetworkTest
     parameters:
         int numberOfNodes = default(1);
         int numberOfEndNodes = default(1);
+        int numberOfRescueNodes = default(0);
+
         //        int numberOfGateways = default(1);
         int networkSizeX = default(500);
         int networkSizeY = default(500);
+
+
 
         @display("bgb=355.824,356.832");
     submodules:
@@ -28,6 +33,12 @@ network LoRaNetworkTest
         loRaNodes[numberOfNodes]: LoRaNode {
             @display("p=83.664,233.856");
         }
+
+        loRaRescueNodes[numberOfRescueNodes]: endRescueNode {
+          //  @display("i=device/ambulance;p=200,174;is=n");
+            @display("i=device/ambulance;p=200,174;is=n");
+        }
+
         loRaGW[numberOfGateways]: LoRaGW {
             @display("p=83.664,150.192;is=s");
         }
@@ -163,6 +174,7 @@ network LoRaMesh
     parameters:
         int numberOfNodes = default(1);
         int numberOfEndNodes = default(1);
+        int numberOfRescueNodes = default(0);
         //        int numberOfEndNodes = default(1);
         int numberOfGateways = default(1);
         int networkSizeX = default(1400);
@@ -189,6 +201,10 @@ network LoRaMesh
 
         loRaEndNodes[numberOfEndNodes]: LoRaNode {
             @display("i=device/receiverdish;p=71,174;is=n");
+        }
+
+        loRaRescueNodes[numberOfRescueNodes]: endRescueNode {
+            @display("i=device/satellite;p=200,200;is=n");
         }
 
         loRaGW[numberOfGateways]: LoRaGW {

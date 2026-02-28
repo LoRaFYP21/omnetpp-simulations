@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <set>
 #ifdef _WIN32
 #include <direct.h>
 #else
@@ -30,6 +31,7 @@
 
 
 #include "inet/mobility/static/StationaryMobility.h"
+#include "inet/mobility/contract/IMobility.h"
 namespace inet {
 
 #define BROADCAST_ADDRESS   16777215
@@ -44,6 +46,37 @@ namespace inet {
 #define ETX_SINGLE_SF                 6
 #define TIME_ON_AIR_HC_CAD_SF        11
 #define TIME_ON_AIR_SF_CAD_SF        12
+
+// Helper: identify if this app instance should behave like an end node.
+// Rescue end nodes rely on iAmRescue; regular end nodes rely on iAmEnd.
+static inline bool isEndNodeHost(cSimpleModule* self) {
+    cModule *hostMod = getContainingNode(self);
+    if (!hostMod) return false;
+    try {
+        // Rescue nodes act as end nodes without needing iAmEnd
+        if (hostMod->hasPar("iAmRescue") && (bool)hostMod->par("iAmRescue"))
+            return true;
+        // Regular end nodes
+        if (hostMod->hasPar("iAmEnd") && (bool)hostMod->par("iAmEnd"))
+            return true;
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
+
+// Helper: identify if this app instance belongs to a rescue node (host parameter iAmRescue=true)
+static inline bool isRescueNodeHost(cSimpleModule* self) {
+    cModule *hostMod = getContainingNode(self);
+    if (!hostMod) return false;
+    if (!hostMod->hasPar("iAmRescue")) return false;
+    try {
+        return (bool)hostMod->par("iAmRescue");
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
 
 Define_Module (LoRaNodeApp);
 
@@ -69,27 +102,81 @@ void LoRaNodeApp::initialize(int stage) {
     if (stage == INITSTAGE_LOCAL) {
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
+        originalNodeIndex = nodeId;  // Store original index before offset
+        
+        // Offset node ID based on host role:
+        // - Rescue nodes: +2000 (preferred when iAmRescue is true)
+        // - End nodes (non-rescue) participating in routing: +1000
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
+            bool isEnd = false;
+            
+            EV << "DEBUG_INIT_LOCAL_V2: Starting node ID assignment for index " << nodeId << endl;
+            EV << "DEBUG_INIT_LOCAL_V2: hostMod = " << (hostMod ? hostMod->getFullPath() : "NULL") << endl;
+            
+            // Check iAmRescue parameter first
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = (bool)hostMod->par("iAmRescue");
+                EV << "DEBUG_INIT_LOCAL_V2: iAmRescue parameter found = " << isRescue << endl;
+            } else {
+                EV << "DEBUG_INIT_LOCAL_V2: iAmRescue parameter NOT found" << endl;
+            }
+            
+            // Check iAmEnd parameter
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = (bool)hostMod->par("iAmEnd");
+                EV << "DEBUG_INIT_LOCAL_V2: iAmEnd parameter found = " << isEnd << endl;
+            } else {
+                EV << "DEBUG_INIT_LOCAL_V2: iAmEnd parameter NOT found" << endl;
+            }
+            
+            // Fallback: detect by parent module name if parameters not set
+            if (!isRescue && !isEnd) {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    EV << "DEBUG_INIT_LOCAL_V2: Using fallback, parent module name = " << baseName << endl;
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                    if (strcmp(baseName, "loRaRescueNodes") == 0) isRescue = true;
+                }
+            }
+
+            EV << "DEBUG_INIT_LOCAL_V2: Final decision - isRescue=" << isRescue << ", isEnd=" << isEnd << ", routingMetric=" << routingMetric << endl;
+            
+            // Rescue nodes take priority over end nodes for ID offset
+            if (isRescue) {
+                nodeId += 2000;
+                EV << "INIT_LOCAL: Rescue node detected, nodeId set to " << nodeId << " (index=" << originalNodeIndex << ")" << endl;
+            } else if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+                EV << "INIT_LOCAL: End node detected, nodeId set to " << nodeId << " (index=" << originalNodeIndex << ")" << endl;
+            } else {
+                EV << "INIT_LOCAL: Relay node, nodeId = " << nodeId << endl;
+            }
+        }
+        
         std::pair<double, double> coordsValues = std::make_pair(-1, -1);
         cModule *host = getContainingNode(this);
 
         // Generate random location for nodes if circle deployment type
+        // Updated to work with any mobility model (not just StationaryMobility)
         if (strcmp(host->par("deploymentType").stringValue(), "circle") == 0) {
             coordsValues = generateUniformCircleCoordinates(
-                    host->par("rad").doubleValue(),
-                    host->par("centX").doubleValue(),
-                    host->par("centY").doubleValue());
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
-            mobility->par("initialX").setDoubleValue(coordsValues.first);
-            mobility->par("initialY").setDoubleValue(coordsValues.second);
-
+                    host->par("maxGatewayDistance").doubleValue(),
+                    host->par("gatewayX").doubleValue(),
+                    host->par("gatewayY").doubleValue());
+            cModule *mobMod = host->getSubmodule("mobility");
+            if (mobMod) {
+                if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(coordsValues.first);
+                if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(coordsValues.second);
+            }
         } else if (strcmp(host->par("deploymentType").stringValue(), "edges")== 0) {
             double minX = host->par("minX");
             double maxX = host->par("maxX");
             double minY = host->par("minY");
             double maxY = host->par("maxY");
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
+            cModule *mobMod = host->getSubmodule("mobility");
 //            if (strcmp(host->par("deploymentType").stringValue(), "circle")==0) {
 //                       coordsValues = generateUniformCircleCoordinates(host->par("maxGatewayDistance").doubleValue(), host->par("gatewayX").doubleValue(), host->par("gatewayY").doubleValue());
 //                       StationaryMobility *mobility = check_and_cast<StationaryMobility *>(host->getSubmodule("mobility"));
@@ -97,27 +184,31 @@ void LoRaNodeApp::initialize(int stage) {
 //                       mobility->par("initialY").setDoubleValue(coordsValues.second);
 //                    }
 
-            mobility->par("initialX").setDoubleValue(
-                    minX + maxX * (((nodeId + 1) % 4 / 2) % 2));
-            mobility->par("initialY").setDoubleValue(
-                    minY + maxY * (((nodeId) % 4 / 2) % 2));
+            if (mobMod) {
+                double newX = minX + maxX * (((nodeId + 1) % 4 / 2) % 2);
+                double newY = minY + maxY * (((nodeId) % 4 / 2) % 2);
+                if (mobMod->hasPar("initialX")) mobMod->par("initialX").setDoubleValue(newX);
+                if (mobMod->hasPar("initialY")) mobMod->par("initialY").setDoubleValue(newY);
+            }
         } else if (strcmp(host->par("deploymentType").stringValue(), "grid") == 0) {
             double minX = host->par("minX");
             double sepX = host->par("sepX");
             double minY = host->par("minY");
             double sepY = host->par("sepY");
             int cols = int(sqrt(numberOfNodes));
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
-            if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
-                mobility->par("initialX").setDoubleValue(minX + sepX * (cols/2));
-                mobility->par("initialY").setDoubleValue(minY + sepY * (cols/2)+ uniform(0,100));
-            }
-            else{
-                mobility->par("initialX").setDoubleValue(
-                        minX + sepX * (nodeId % cols) + uniform(0,100));
-                mobility->par("initialY").setDoubleValue(
-                        minY + sepY * ((int) nodeId / cols) + uniform(0,100));
+
+            cModule *mobMod2 = host->getSubmodule("mobility");
+            if (mobMod2) {
+                double newX, newY;
+                if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
+                    newX = minX + sepX * (cols/2);
+                    newY = minY + sepY * (cols/2) + uniform(0,100);
+                } else {
+                    newX = minX + sepX * (nodeId % cols) + uniform(0,100);
+                    newY = minY + sepY * ((int) nodeId / cols) + uniform(0,100);
+                }
+                if (mobMod2->hasPar("initialX")) mobMod2->par("initialX").setDoubleValue(newX);
+                if (mobMod2->hasPar("initialY")) mobMod2->par("initialY").setDoubleValue(newY);
             }
         } else {
             double minX = host->par("minX");
@@ -127,11 +218,12 @@ void LoRaNodeApp::initialize(int stage) {
             //creating the possibility to give a position with the X and Y coordinates.
             double inix = host->par("initialX");
             double iniy = host->par("initialY");
-                // checking whether the node is a end node or not.
-            StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-                    host->getSubmodule("mobility"));
-            mobility->par("initialX").setDoubleValue(inix);
-            mobility->par("initialY").setDoubleValue(iniy);
+            bool end = host->par("iAmEnd");
+            cModule *mobMod3 = host->getSubmodule("mobility");
+            if (mobMod3) {
+                if (mobMod3->hasPar("initialX")) mobMod3->par("initialX").setDoubleValue(inix);
+                if (mobMod3->hasPar("initialY")) mobMod3->par("initialY").setDoubleValue(iniy);
+            }
         }
     } else if (stage == INITSTAGE_APPLICATION_LAYER) {
         bool isOperational;
@@ -254,6 +346,17 @@ void LoRaNodeApp::initialize(int stage) {
         // AODV retry configuration
         aodvRreqBackoff = par("aodvRreqBackoff");
         aodvRreqMaxRetries = par("aodvRreqMaxRetries");
+        aodvRrepJitter = par("aodvRrepJitter");
+        
+        // RREP-ACK configuration (RFC3561) - optional, default disabled
+        aodvEnableRrepAck = par("aodvEnableRrepAck").boolValue();
+        if (aodvEnableRrepAck) {
+            aodvMaxRrepRetries = par("aodvMaxRrepRetries").intValue();
+            aodvRrepAckTimeout = par("aodvRrepAckTimeout").doubleValue();
+            aodvBlacklistTimeout = par("aodvBlacklistTimeout").doubleValue();
+            EV << "RREP-ACK enabled: maxRetries=" << aodvMaxRrepRetries 
+               << " timeout=" << aodvRrepAckTimeout << " blacklist=" << aodvBlacklistTimeout << endl;
+        }
 
         windowSize = std::min(32, std::max<int>(1, par("windowSize").intValue())); //Must be an int between 1 and 32
         // cModule *host = getContainingNode(this);
@@ -337,8 +440,57 @@ void LoRaNodeApp::initialize(int stage) {
         singleMetricRoutingTable = {};
         dualMetricRoutingTable = {};
 
-        //Node identifier
+        //Node identifier (re-assign and apply rescue/end offset consistently)
         nodeId = getContainingNode(this)->getIndex();
+        originalNodeIndex = nodeId;  // Store original index
+        {
+            cModule *hostMod = getContainingNode(this);
+            bool isRescue = false;
+            bool isEnd = false;
+            
+            EV << "DEBUG_INIT_APP_V2: Starting node ID assignment for index " << nodeId << endl;
+            EV << "DEBUG_INIT_APP_V2: hostMod = " << (hostMod ? hostMod->getFullPath() : "NULL") << endl;
+            
+            // Check iAmRescue parameter first
+            if (hostMod && hostMod->hasPar("iAmRescue")) {
+                isRescue = (bool)hostMod->par("iAmRescue");
+                EV << "DEBUG_INIT_APP_V2: iAmRescue parameter found = " << isRescue << endl;
+            } else {
+                EV << "DEBUG_INIT_APP_V2: iAmRescue parameter NOT found" << endl;
+            }
+            
+            // Check iAmEnd parameter
+            if (hostMod && hostMod->hasPar("iAmEnd")) {
+                isEnd = (bool)hostMod->par("iAmEnd");
+                EV << "DEBUG_INIT_APP_V2: iAmEnd parameter found = " << isEnd << endl;
+            } else {
+                EV << "DEBUG_INIT_APP_V2: iAmEnd parameter NOT found" << endl;
+            }
+            
+            // Fallback: detect by parent module name if parameters not set
+            if (!isRescue && !isEnd) {
+                cModule *parent = getParentModule();
+                if (parent) {
+                    const char *baseName = parent->getName();
+                    EV << "DEBUG_INIT_APP_V2: Using fallback, parent module name = " << baseName << endl;
+                    if (strcmp(baseName, "loRaEndNodes") == 0) isEnd = true;
+                    if (strcmp(baseName, "loRaRescueNodes") == 0) isRescue = true;
+                }
+            }
+
+            EV << "DEBUG_INIT_APP_V2: Final decision - isRescue=" << isRescue << ", isEnd=" << isEnd << ", routingMetric=" << routingMetric << endl;
+            
+            // Rescue nodes take priority over end nodes for ID offset
+            if (isRescue) {
+                nodeId += 2000;
+                EV << "INIT_APP: Rescue node confirmed, nodeId = " << nodeId << " (index=" << originalNodeIndex << ")" << endl;
+            } else if (isEnd && routingMetric != 0) {
+                nodeId += 1000;
+                EV << "INIT_APP: End node confirmed, nodeId = " << nodeId << " (index=" << originalNodeIndex << ")" << endl;
+            } else {
+                EV << "INIT_APP: Relay node, nodeId = " << nodeId << endl;
+            }
+        }
 
         //Application acknowledgment
         requestACKfromApp = par("requestACKfromApp");
@@ -420,10 +572,19 @@ void LoRaNodeApp::initialize(int stage) {
             numberOfDestinationsPerNode = numberOfNodes-1;
             EV<< "printing node ID" << endl;
         }
-        generateDataPackets();
+        
+        // Rescue nodes are destination-only: they don't generate data packets, only receive and respond
+        bool iAmRescue = isRescueNodeHost(this);
+        if (iAmRescue) {
+            EV << "Node " << nodeId << " is a RESCUE NODE - will not generate data or routing packets" << endl;
+        }
+        
+        if (!iAmRescue) {
+            generateDataPackets();
+        }
 
-        // Routing packets timer: suppress if AODV-only mode is enabled
-        if (!aodvOnly) {
+        // Routing packets timer: suppress if AODV-only mode is enabled OR if this is a rescue node (destination-only)
+        if (!aodvOnly && !iAmRescue) {
             timeToFirstRoutingPacket = math::max(5, par("timeToFirstRoutingPacket"))+getTimeToNextRoutingPacket();
             switch (routingMetric) {
                 case NO_FORWARDING:
@@ -499,8 +660,10 @@ void LoRaNodeApp::initialize(int stage) {
 
 std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
     double radius, double centX, double centY) {
-    nodeId = getContainingNode(this)->getIndex();
+    // Recompute effective node id with rescue/end offsets for any path that recalculates it
+    int baseId = getContainingNode(this)->getIndex();
     routingMetric = par("routingMetric");
+    nodeId = baseId + (isRescueNodeHost(this) ? 2000 : ((isEndNodeHost(this) && routingMetric != 0) ? 1000 : 0));
 
     if (nodeId == 0 && routingMetric == 0) // only for the end nodes and the packet originator
     {
@@ -541,9 +704,16 @@ std::pair<double, double> LoRaNodeApp::generateUniformCircleCoordinates(
 
 void LoRaNodeApp::finish() {
     cModule *host = getContainingNode(this);
-    StationaryMobility *mobility = check_and_cast<StationaryMobility *>(
-            host->getSubmodule("mobility"));
-    Coord coord = mobility->getCurrentPosition();
+    Coord coord;
+    if (auto mobMod = host->getSubmodule("mobility")) {
+        if (auto mobIface = dynamic_cast<inet::IMobility *>(mobMod)) {
+            coord = mobIface->getCurrentPosition();
+        } else if (mobMod->hasPar("initialX") && mobMod->hasPar("initialY")) {
+            coord = Coord(mobMod->par("initialX").doubleValue(), mobMod->par("initialY").doubleValue(), 0);
+        }
+        recordScalar("positionX", coord.x);
+        recordScalar("positionY", coord.y);
+    }
 //    recordScalar("positionX", coord.x);
 //    recordScalar("positionY", coord.y);
     // DistanceX.record(coord.x);
@@ -674,6 +844,11 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
         const char* n = msg->getName();
         if (n && strncmp(n, "AODV_RETRY_", 11) == 0) {
             handleAodvRetryTimer(msg);
+            return;
+        }
+        // RREP-ACK timeout timers
+        if (n && strncmp(n, "AODV_RREPACK_TIMEOUT_", 21) == 0) {
+            handleRrepAckTimer(msg);
             return;
         }
         handleSelfMessage(msg);
@@ -1666,10 +1841,25 @@ static inline bool seqOlder(uint32_t a, uint32_t b) {
 }
 
 void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
-    // envelope contains AODV inner packet (aodv::Rreq or aodv::Rrep)
+    // envelope contains AODV inner packet (aodv::Rreq or aodv::Rrep or aodv::RrepAck)
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
     cPacket *inner = packet->getEncapsulatedPacket();
+    
+    // Handle RREP-ACK messages
+    if (auto rrepAck = dynamic_cast<aodv::RrepAck*>(inner)) {
+        handleRrepAck(msg);
+        return;
+    }
+    
     if (auto rreq = dynamic_cast<aodv::Rreq*>(inner)) {
+        // Check if sender is blacklisted (unidirectional link)
+        if (aodvEnableRrepAck && isNodeBlacklisted(packet->getLastHop())) {
+            EV << "AODV: Drop RREQ from blacklisted node " << packet->getLastHop() 
+               << " at node " << nodeId << endl;
+            bubble("Drop RREQ from blacklisted");
+            return;
+        }
+        
         // Duplicate suppression based on (src, bcastId)
         long long key = (static_cast<long long>(rreq->getSrcId()) << 32) | (static_cast<unsigned int>(rreq->getBcastId()));
         if (aodvSeenRreqs.count(key)) {
@@ -1723,7 +1913,18 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             }
         }
 
+        // Debug: Log RREQ destination check (especially important for rescue nodes)
+        EV << "DEBUG_RREQ_V2: ========== RREQ DESTINATION CHECK ==========" << endl;
+        EV << "DEBUG_RREQ_V2: RREQ dstId = " << rreq->getDstId() << endl;
+        EV << "DEBUG_RREQ_V2: My nodeId = " << nodeId << endl;
+        EV << "DEBUG_RREQ_V2: Match? " << (rreq->getDstId() == nodeId ? "YES" : "NO") << endl;
+        EV << "AODV RREQ: Node " << nodeId << " checking if destination (RREQ dst=" << rreq->getDstId() << ", my nodeId=" << nodeId << ")" << endl;
+        if (isRescueNodeHost(this)) {
+            EV << "  -> This is a RESCUE NODE with nodeId=" << nodeId << endl;
+        }
+
         if (rreq->getDstId() == nodeId) {
+            EV << "DEBUG_RREQ_V2: *** I AM THE DESTINATION *** Generating RREP..." << endl;
             // Destination received an RREQ: log to CSV for this destination
             logRreqAtDestination(rreq);
             // I'm the destination: send RREP back to source
@@ -1741,6 +1942,12 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             innerRrep->setByteLength(12);
             innerRrep->setPathArraySize(1);
             innerRrep->setPath(0, nodeId);
+            
+            // RFC3561 RREP-ACK: Set A-bit when enabled (for unidirectional link detection)
+            if (aodvEnableRrepAck) {
+                innerRrep->setAckRequired(true);
+                EV << "AODV: Setting RREP A-bit for next hop " << parent << endl;
+            }
 
             // Immediately log a 'create' event so rrep_path.csv exists even if forwarding later fails
             // originSrc=src, finalDst=nodeId, envelopeDest=src, envelopeVia=parent, nextHop=parent, hopCount=0
@@ -1754,9 +1961,18 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             rrepEnv.setLastHop(nodeId);
             rrepEnv.setTtl(packetTTL);
             rrepEnv.encapsulate(innerRrep);
+            
+            // RFC3561 RREP-ACK: Schedule timeout if A-bit is set
+            if (aodvEnableRrepAck && innerRrep->getAckRequired()) {
+                scheduleRrepAckTimer(parent, src, nodeId, &rrepEnv);
+                EV << "AODV: Scheduled RREP-ACK timer for next hop " << parent << " (destination)" << endl;
+            }
+            
             aodvPacketsToSend.push_back(rrepEnv);
-            aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
+            // Apply RREP jitter: destination delays reply to let RREQ flood settle
+            aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime() + aodvRrepJitter;
         } else {
+            EV << "DEBUG_RREQ_V2: *** NOT the destination *** Will forward RREQ as intermediate node" << endl;
             // Intermediate: DO NOT send RREP; only destination replies
             // Forward RREQ if TTL allows
             if (packet->getTtl() > 1) {
@@ -1786,6 +2002,14 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             bubble("Drop RREP not for me");
             return; // not for me to forward
         }
+        
+        // RFC3561 RREP-ACK: Send acknowledgment if A-bit is set
+        if (aodvEnableRrepAck && rrep->getAckRequired()) {
+            int sender = packet->getLastHop();
+            sendRrepAck(sender);
+            EV << "AODV: Sent RREP-ACK to " << sender << " (A-bit was set)" << endl;
+        }
+        
     // Log RREP reception event
         logRrepEvent("recv", rrep->getSrcId(), rrep->getDstId(), packet->getDestination(), packet->getVia(), -1, rrep->getHopCount());
     int rps = rrep->getPathArraySize();
@@ -1864,6 +2088,13 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 bubble("Fwd RREP unicast");
                 int hopc = 0; if (auto fi = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket())) hopc = fi->getHopCount();
                 logRrepEvent("fwd", rrep->getSrcId(), rrep->getDstId(), fwd.getDestination(), packet->getVia(), fwd.getVia(), hopc);
+                
+                // RFC3561 RREP-ACK: Schedule timeout if A-bit is set
+                if (aodvEnableRrepAck && rrep->getAckRequired()) {
+                    scheduleRrepAckTimer(fwd.getVia(), rrep->getSrcId(), rrep->getDstId(), &fwd);
+                    EV << "AODV: Scheduled RREP-ACK timer for next hop " << fwd.getVia() << endl;
+                }
+                
                 aodvPacketsToSend.push_back(fwd);
                 aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime();
             } else {
@@ -2339,28 +2570,48 @@ simtime_t LoRaNodeApp::sendRoutingPacket() {
 
             transmit = true;
 
-            // Count the number of best routes
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
+            // Ensure we advertise only end-node routes (strip relay routes first)
+            filterRoutesToEndNodes();
+
+            // Build a unique set of destination IDs from the current routing table
+            // and ALWAYS include a self-route (id=nodeId, metric=0) so neighbors learn routes to us.
+            {
+                std::set<int> destIds;
+                destIds.insert(nodeId); // self
+                for (const auto &r : singleMetricRoutingTable) {
+                    if (r.id != nodeId)
+                        destIds.insert(r.id);
+                }
+
+                // Count routable destinations: self + best known routes
+                numberOfRoutes = 0;
+                for (int did : destIds) {
+                    if (did == nodeId) {
+                        numberOfRoutes++;
+                    } else if (getBestRouteIndexTo(did) >= 0) {
                         numberOfRoutes++;
                     }
                 }
-            }
 
-            // Make room for numberOfRoutes routes
-            routingPacket->setRoutingTableArraySize(numberOfRoutes);
+                // Make room for numberOfRoutes routes
+                routingPacket->setRoutingTableArraySize(numberOfRoutes);
 
-            // Add the best route to each node
-            for (int i=0; i<numberOfNodes; i++) {
-                if (i != nodeId) {
-                    if (getBestRouteIndexTo(i) >= 0) {
-
-                        LoRaRoute thisLoRaRoute;
-                        thisLoRaRoute.setId(singleMetricRoutingTable[getBestRouteIndexTo(i)].id);
-                        thisLoRaRoute.setPriMetric(singleMetricRoutingTable[getBestRouteIndexTo(i)].metric);
-                        routingPacket->setRoutingTable(numberOfRoutes-1, thisLoRaRoute);
-                        numberOfRoutes--;
+                // Add routes to packet
+                int idx = 0;
+                for (int did : destIds) {
+                    LoRaRoute thisLoRaRoute;
+                    if (did == nodeId) {
+                        // Self-route: I am reachable with metric 0
+                        thisLoRaRoute.setId(nodeId);
+                        thisLoRaRoute.setPriMetric(0);
+                        routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                    } else {
+                        int bestIdx = getBestRouteIndexTo(did);
+                        if (bestIdx >= 0) {
+                            thisLoRaRoute.setId(singleMetricRoutingTable[bestIdx].id);
+                            thisLoRaRoute.setPriMetric(singleMetricRoutingTable[bestIdx].metric);
+                            routingPacket->setRoutingTable(idx++, thisLoRaRoute);
+                        }
                     }
                 }
             }
@@ -2436,8 +2687,10 @@ void LoRaNodeApp::generateDataPackets() {
             numberOfDestinationsPerNode = numberOfNodes-1;
 
     // If configured, force a single known destination id (e.g., for node 0 demo)
-    if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId < numberOfNodes && forcedDestinationId != nodeId) {
+    // Note: destination IDs can be in ranges: 0-999 (relay), 1000-1999 (end), 2000-2999 (rescue)
+    if (forceSingleDestination && forcedDestinationId >= 0 && forcedDestinationId != nodeId) {
         destinations.push_back(forcedDestinationId);
+        EV << "Node " << nodeId << " forcing destination to " << forcedDestinationId << endl;
     }
 
     while (destinations.size() < numberOfDestinationsPerNode
@@ -2752,6 +3005,40 @@ void LoRaNodeApp::sanitizeRoutingTable() {
     }
 }
 
+void LoRaNodeApp::filterRoutesToEndNodes() {
+    // Accept all destination IDs mapped to end-like nodes:
+    // - Classic end nodes: 1000 .. (1000 + numberOfEndNodes - 1)
+    // - Rescue end nodes: 2000 .. (2000 + numberOfRescueNodes - 1)
+    // LoRaNodeApp does not declare numberOfRescueNodes; to avoid
+    // excluding rescues, keep any id >= 1000. This includes both
+    // classic end nodes (1000+) and rescue nodes (2000+).
+    int endMin = 1000;
+
+    // Single metric filtering
+    if (!singleMetricRoutingTable.empty()) {
+        std::vector<singleMetricRoute> filtered;
+        filtered.reserve(singleMetricRoutingTable.size());
+        for (const auto &r : singleMetricRoutingTable) {
+            if (r.id >= endMin) {
+                filtered.push_back(r);
+            }
+        }
+        singleMetricRoutingTable = std::move(filtered);
+    }
+
+    // Dual metric filtering
+    if (!dualMetricRoutingTable.empty()) {
+        std::vector<dualMetricRoute> filtered2;
+        filtered2.reserve(dualMetricRoutingTable.size());
+        for (const auto &r : dualMetricRoutingTable) {
+            if (r.id >= endMin) {
+                filtered2.push_back(r);
+            }
+        }
+        dualMetricRoutingTable = std::move(filtered2);
+    }
+}
+
 int LoRaNodeApp::getSFTo(int destination) {
     if (dualMetricRoutingTable.size() > 0) {
         int dualMetricRoutesCount = end(dualMetricRoutingTable) - begin(dualMetricRoutingTable);
@@ -2928,6 +3215,187 @@ simtime_t LoRaNodeApp::getTimeToNextForwardPacket() {
     return simTime();
 }
 
+//=============================================================================
+// RREP-ACK Implementation (RFC3561 Section 6.7)
+//=============================================================================
 
+/**
+ * Check if a node is currently blacklisted (unidirectional link detected)
+ */
+bool LoRaNodeApp::isNodeBlacklisted(int nodeId) {
+    auto it = aodvBlacklistedNodes.find(nodeId);
+    if (it != aodvBlacklistedNodes.end()) {
+        if (simTime() < it->second) {
+            return true; // still blacklisted
+        } else {
+            // blacklist expired, remove
+            aodvBlacklistedNodes.erase(it);
+        }
+    }
+    return false;
+}
 
-} //end namespace inet
+/**
+ * Blacklist a node for BLACKLIST_TIMEOUT duration
+ */
+void LoRaNodeApp::blacklistNode(int nodeId) {
+    aodvBlacklistedNodes[nodeId] = simTime() + aodvBlacklistTimeout;
+    EV << "RREP-ACK: Blacklisted node " << nodeId << " until " << aodvBlacklistedNodes[nodeId] << endl;
+}
+
+/**
+ * Send RREP-ACK to acknowledge receipt of RREP
+ */
+void LoRaNodeApp::sendRrepAck(int viaNode) {
+    if (!aodvEnableRrepAck) return;
+    
+    EV << "RREP-ACK: Sending ACK to node " << viaNode << " from node " << nodeId << endl;
+    
+    aodv::RrepAck *innerAck = new aodv::RrepAck("RREP-ACK");
+    innerAck->setByteLength(2); // minimal packet
+    
+    LoRaAppPacket ackEnv("AODV-RREP-ACK");
+    ackEnv.setMsgType(ROUTING);
+    ackEnv.setSource(nodeId);
+    ackEnv.setDestination(viaNode); // unicast to previous hop
+    ackEnv.setVia(viaNode);
+    ackEnv.setLastHop(nodeId);
+    ackEnv.setTtl(1); // single hop
+    ackEnv.encapsulate(innerAck);
+    
+    aodvPacketsToSend.push_back(ackEnv);
+    aodvPacketsDue = true;
+    nextAodvPacketTransmissionTime = simTime(); // send immediately
+    scheduleSelfAt(simTime());
+}
+
+/**
+ * Handle received RREP-ACK message
+ */
+void LoRaNodeApp::handleRrepAck(cMessage *msg) {
+    LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+    cPacket *inner = packet->getEncapsulatedPacket();
+    
+    if (auto ack = dynamic_cast<aodv::RrepAck*>(inner)) {
+        int from = packet->getSource();
+        EV << "RREP-ACK: Received ACK from node " << from << " at node " << nodeId << endl;
+        
+        // Find and cancel pending RREP-ACK timer for this node
+        std::vector<std::string> toRemove;
+        for (auto &pending : aodvPendingRrepAcks) {
+            if (pending.second.nextHop == from) {
+                EV << "RREP-ACK: Canceling pending ACK timer for key " << pending.first << endl;
+                if (pending.second.timer && pending.second.timer->isScheduled()) {
+                    cancelEvent(pending.second.timer);
+                }
+                delete pending.second.timer;
+                toRemove.push_back(pending.first);
+            }
+        }
+        for (auto &key : toRemove) {
+            aodvPendingRrepAcks.erase(key);
+        }
+    }
+}
+
+/**
+ * Schedule RREP-ACK timeout timer
+ */
+void LoRaNodeApp::scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst) {
+    if (!aodvEnableRrepAck) return;
+    
+    std::string key = std::to_string(nextHop) + "_" + std::to_string(origSrc) + "_" + std::to_string(finalDst);
+    
+    // Cancel existing timer if any
+    cancelRrepAckTimer(nextHop, origSrc, finalDst);
+    
+    cMessage *timer = new cMessage("RREP-ACK-TIMEOUT");
+    timer->setContextPointer((void*)strdup(key.c_str())); // store key for retrieval
+    scheduleAt(simTime() + aodvRrepAckTimeout, timer);
+    
+    auto &pending = aodvPendingRrepAcks[key];
+    pending.timer = timer;
+    pending.nextHop = nextHop;
+    pending.origSrc = origSrc;
+    pending.finalDst = finalDst;
+    
+    EV << "RREP-ACK: Scheduled timeout for nextHop=" << nextHop << " key=" << key << endl;
+}
+
+/**
+ * Cancel pending RREP-ACK timer
+ */
+void LoRaNodeApp::cancelRrepAckTimer(int nextHop, int origSrc, int finalDst) {
+    std::string key = std::to_string(nextHop) + "_" + std::to_string(origSrc) + "_" + std::to_string(finalDst);
+    
+    auto it = aodvPendingRrepAcks.find(key);
+    if (it != aodvPendingRrepAcks.end()) {
+        if (it->second.timer && it->second.timer->isScheduled()) {
+            cancelEvent(it->second.timer);
+        }
+        delete it->second.timer;
+        aodvPendingRrepAcks.erase(it);
+    }
+}
+
+/**
+ * Handle RREP-ACK timeout - retransmit or blacklist
+ */
+void LoRaNodeApp::handleRrepAckTimer(cMessage *msg) {
+    if (!aodvEnableRrepAck) {
+        delete msg;
+        return;
+    }
+    
+    const char *keyPtr = (const char *)msg->getContextPointer();
+    if (!keyPtr) {
+        delete msg;
+        return;
+    }
+    std::string key(keyPtr);
+    free((void*)keyPtr);
+    
+    auto it = aodvPendingRrepAcks.find(key);
+    if (it == aodvPendingRrepAcks.end()) {
+        delete msg;
+        return; // already handled
+    }
+    
+    auto &pending = it->second;
+    pending.retryCount++;
+    
+    EV << "RREP-ACK: Timeout for key=" << key 
+       << " retry=" << pending.retryCount << "/" << aodvMaxRrepRetries << endl;
+    
+    if (pending.retryCount >= aodvMaxRrepRetries) {
+        // Max retries reached: blacklist the next hop
+        EV << "RREP-ACK: Max retries reached, blacklisting node " << pending.nextHop << endl;
+        blacklistNode(pending.nextHop);
+        
+        // Remove the route through this next hop
+        for (size_t i = 0; i < singleMetricRoutingTable.size(); ) {
+            if (singleMetricRoutingTable[i].via == pending.nextHop) {
+                EV << "RREP-ACK: Removing route to " << singleMetricRoutingTable[i].id 
+                   << " via blacklisted " << pending.nextHop << endl;
+                singleMetricRoutingTable.erase(singleMetricRoutingTable.begin() + i);
+            } else {
+                ++i;
+            }
+        }
+        
+        delete msg;
+        aodvPendingRrepAcks.erase(it);
+    } else {
+        // Retransmit RREP
+        EV << "RREP-ACK: Retransmitting RREP to " << pending.nextHop << endl;
+        
+        if (pending.rrepCopy.getByteLength() > 0) {
+            aodvPacketsToSend.push_back(pending.rrepCopy);
+            aodvPacketsDue = true;
+            nextAodvPacketTransmissionTime = simTime();
+        }
+        
+        // Reschedule timer
+        scheduleAt(simTime() + aodvRrepAckTimeout, msg);
+    }
+}

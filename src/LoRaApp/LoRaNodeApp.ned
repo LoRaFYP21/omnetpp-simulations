@@ -92,6 +92,13 @@ simple LoRaNodeApp
     // AODV RREQ retry configuration
     volatile double aodvRreqBackoff @unit(s) = default(30s);
     int aodvRreqMaxRetries = default(3);
+    // AODV RREP jitter: destination waits random time before replying to let RREQ flood settle
+    volatile double aodvRrepJitter @unit(s) = default(uniform(0ms, 50ms));
+    // RFC3561 RREP-ACK for unidirectional link detection
+    bool aodvEnableRrepAck = default(false);
+    int aodvMaxRrepRetries = default(2);
+    volatile double aodvRrepAckTimeout @unit(s) = default(0.1s);
+    volatile double aodvBlacklistTimeout @unit(s) = default(10s);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);
