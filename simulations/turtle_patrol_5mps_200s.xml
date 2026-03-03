@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Turtle Mobility Script for Rescue Node
+- Speed: 5 m/s
+- Simple custom path: 10m forward, turn 45deg right, 10m, turn 90deg right, 10m, turn 45deg right, 10m
+-->
+<movement>
+    <!-- Set constant speed of 5 m/s -->
+    <set speed="5"/>
+
+    <!-- Custom path as requested -->
+    <!-- 1) Go 10m forward -->
+    <forward d="100"/>
+    <!-- 2) Turn 45 degrees to the right and go 10m -->
+    <turn angle="45"/>
+    <forward d="100"/>
+    <!-- 3) Turn 90 degrees to the right and go 10m -->
+    <turn angle="90"/>
+    <forward d="100"/>
+    <!-- 4) Turn 45 degrees to the right and go 10m -->
+    <turn angle="45"/>
+    <forward d="100"/>
+
+</movement>

@@ -86,7 +86,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void handleRrepAck(cMessage *msg);
     void sendRrepAck(int viaNode);
     void handleRrepAckTimer(cMessage *msg);
-    void scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst);
+    void scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst, LoRaAppPacket *rrepCopy);
     void cancelRrepAckTimer(int nextHop, int origSrc, int finalDst);
     bool isNodeBlacklisted(int nodeId);
     void blacklistNode(int nodeId);

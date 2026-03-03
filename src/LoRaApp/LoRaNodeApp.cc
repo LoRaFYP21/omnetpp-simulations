@@ -3301,7 +3301,7 @@ void LoRaNodeApp::handleRrepAck(cMessage *msg) {
 /**
  * Schedule RREP-ACK timeout timer
  */
-void LoRaNodeApp::scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst) {
+void LoRaNodeApp::scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst, LoRaAppPacket *rrepCopy) {
     if (!aodvEnableRrepAck) return;
     
     std::string key = std::to_string(nextHop) + "_" + std::to_string(origSrc) + "_" + std::to_string(finalDst);
@@ -3318,6 +3318,7 @@ void LoRaNodeApp::scheduleRrepAckTimer(int nextHop, int origSrc, int finalDst) {
     pending.nextHop = nextHop;
     pending.origSrc = origSrc;
     pending.finalDst = finalDst;
+    pending.rrepCopy = *rrepCopy;  // Store copy for retransmission
     
     EV << "RREP-ACK: Scheduled timeout for nextHop=" << nextHop << " key=" << key << endl;
 }
@@ -3399,3 +3400,4 @@ void LoRaNodeApp::handleRrepAckTimer(cMessage *msg) {
         scheduleAt(simTime() + aodvRrepAckTimeout, msg);
     }
 }
+} // namespace inet
