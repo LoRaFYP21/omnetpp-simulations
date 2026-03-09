@@ -90,11 +90,15 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void cancelRrepAckTimer(int nextHop, int origSrc, int finalDst);
     bool isNodeBlacklisted(int nodeId);
     void blacklistNode(int nodeId);
-    // Log when an AODV RREQ reaches its destination (per-destination CSV)
+    // Log when an AODV RREQ is processed at any node (destination or intermediate)
     void logRreqAtDestination(const aodv::Rreq* rreq);
     // Unified RREP hop/path logger
-    void logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount);
-    // Log final delivered data packet path
+    void logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount, const aodv::Rrep* rrep);
+    // Log data packet transmission at source
+    void logDataTransmission(const LoRaAppPacket* packet);
+    // Log data packet reception at destination only
+    void logDataReception(const LoRaAppPacket* packet);
+    // Log final delivered data packet path (delegates to logDataReception)
     void logDataDeliveryPath(const LoRaAppPacket* packet);
     // Log final RREP full path when it reaches the original source
     void logRrepFinalPath(const aodv::Rrep* rrep);

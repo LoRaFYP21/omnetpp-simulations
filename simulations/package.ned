@@ -204,7 +204,7 @@ network LoRaMesh
         }
 
         loRaRescueNodes[numberOfRescueNodes]: endRescueNode {
-            @display("i=device/satellite;p=200,200;is=n");
+            @display("i=device/ambulance;p=200,200;is=n");
         }
 
         loRaGW[numberOfGateways]: LoRaGW {

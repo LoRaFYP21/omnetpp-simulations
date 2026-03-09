@@ -877,6 +877,9 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
         // TODO: Not using dataPacketsDue ???
         if ( LoRaPacketsToSend.size() > 0 && simTime() >= nextDataPacketTransmissionTime ) {
             sendData = true;
+            EV << "AODV_DEBUG: Data ready to send at node " << nodeId << ", simTime=" << simTime() << ", nextDataTime=" << nextDataPacketTransmissionTime << ", queueSize=" << LoRaPacketsToSend.size() << endl;
+        } else if (LoRaPacketsToSend.size() > 0) {
+            EV << "AODV_DEBUG: Data waiting at node " << nodeId << ", simTime=" << simTime() << ", nextDataTime=" << nextDataPacketTransmissionTime << " (blocked until " << (nextDataPacketTransmissionTime - simTime()) << "s)" << endl;
         }
 
         // Check if there are data packets to forward, and if it is time to send them
@@ -1088,8 +1091,8 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
         bubble("I received a data packet for me!");
 
     std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
-    // Log final delivery path for DATA at destination
-    logDataDeliveryPath(packet);
+    // Log reception at destination
+    logDataReception(packet);
 
         manageReceivedPacketForMe(packet);
         if (firstDataPacketReceptionTime == 0) {
@@ -1729,6 +1732,7 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         // If table-based routing and no route exists, trigger AODV discovery and buffer this DATA
         bool tableBased = (routingMetric == HOP_COUNT_SINGLE_SF || routingMetric == RSSI_SUM_SINGLE_SF || routingMetric == RSSI_PROD_SINGLE_SF || routingMetric == ETX_SINGLE_SF || routingMetric == TIME_ON_AIR_HC_CAD_SF || routingMetric == TIME_ON_AIR_SF_CAD_SF);
         if (tableBased && routeIndex < 0) {
+            EV << "AODV_DEBUG: No route to dest " << dataPacket->getDestination() << " at node " << nodeId << ", buffering data at simTime=" << simTime() << endl;
             maybeStartDiscoveryFor(dataPacket->getDestination());
             aodvBufferedData[dataPacket->getDestination()].push_back(*dataPacket);
             // Do not send this DATA now
@@ -1812,6 +1816,11 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         }
 
 
+        // Log transmission if this is a local data packet from this source
+        if (localData && dataPacket->getMsgType() == DATA) {
+            logDataTransmission(dataPacket);
+        }
+        
         send(dataPacket, "appOut");
         txSfVector.record(loRaSF);
         txTpVector.record(loRaTP);
@@ -1900,6 +1909,9 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         // Log snapshot after reverse route update
         logRoutingTableSnapshot("aodv_rreq_processed");
 
+        // Log RREQ processing at this node (destination or intermediate)
+        logRreqAtDestination(rreq);
+
         // Track first-seen parent per-origin for this discovery wave
         auto bIt = aodvReverseBcastId.find(src);
         if (bIt == aodvReverseBcastId.end() || bIt->second < rreq->getBcastId()) {
@@ -1925,8 +1937,6 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
 
         if (rreq->getDstId() == nodeId) {
             EV << "DEBUG_RREQ_V2: *** I AM THE DESTINATION *** Generating RREP..." << endl;
-            // Destination received an RREQ: log to CSV for this destination
-            logRreqAtDestination(rreq);
             // I'm the destination: send RREP back to source
             int parent = aodvReverseParent.count(src) ? aodvReverseParent[src] : via;
             EV << "AODV: DEST received first RREQ from src=" << src << ", replying via parent=" << parent << endl;
@@ -1951,7 +1961,7 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
 
             // Immediately log a 'create' event so rrep_path.csv exists even if forwarding later fails
             // originSrc=src, finalDst=nodeId, envelopeDest=src, envelopeVia=parent, nextHop=parent, hopCount=0
-            logRrepEvent("create", src, nodeId, src, parent, parent, innerRrep->getHopCount());
+            logRrepEvent("create", src, nodeId, src, parent, parent, innerRrep->getHopCount(), innerRrep);
 
             LoRaAppPacket rrepEnv("AODV-RREP");
             rrepEnv.setMsgType(ROUTING);
@@ -2011,7 +2021,7 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         }
         
     // Log RREP reception event
-        logRrepEvent("recv", rrep->getSrcId(), rrep->getDstId(), packet->getDestination(), packet->getVia(), -1, rrep->getHopCount());
+        logRrepEvent("recv", rrep->getSrcId(), rrep->getDstId(), packet->getDestination(), packet->getVia(), -1, rrep->getHopCount(), rrep);
     int rps = rrep->getPathArraySize();
     rrep->setPathArraySize(rps+1);
     rrep->setPath(rps, nodeId);
@@ -2061,6 +2071,8 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                     aodvLockedNextHopExpiry[dest] = simTime() + routeTimeout; // expire with route timeout
                     EV << "AODV: Lock next hop toward dest=" << dest << " via=" << aodvLockedNextHop[dest] << " at source node " << nodeId << endl;
                 }
+                int bufferedCount = it->second.size();
+                EV << "AODV_DEBUG: RREP final at node " << nodeId << " releasing " << bufferedCount << " buffered packets to dest " << dest << " at simTime=" << simTime() << endl;
                 for (auto &dp : it->second) {
                     // Force via to locked next hop if available (preserve path of RREP)
                     if (aodvLockedNextHop.count(dest)) {
@@ -2070,6 +2082,9 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 }
                 aodvBufferedData.erase(it);
                 dataPacketsDue = true;
+                // Reset data packet transmission time to allow immediate sending
+                nextDataPacketTransmissionTime = simTime();
+                EV << "AODV_DEBUG: Reset nextDataPacketTransmissionTime to " << nextDataPacketTransmissionTime << " for immediate transmission" << endl;
             }
         } else if (packet->getTtl() > 1) {
             // Forward RREP towards original source strictly along reverse path
@@ -2086,8 +2101,10 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
                 }
                 EV << "AODV: Forward RREP unicast to via=" << fwd.getVia() << " at node " << nodeId << endl;
                 bubble("Fwd RREP unicast");
-                int hopc = 0; if (auto fi = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket())) hopc = fi->getHopCount();
-                logRrepEvent("fwd", rrep->getSrcId(), rrep->getDstId(), fwd.getDestination(), packet->getVia(), fwd.getVia(), hopc);
+                int hopc = 0; 
+                aodv::Rrep* fi = dynamic_cast<aodv::Rrep*>(fwd.getEncapsulatedPacket());
+                if (fi) hopc = fi->getHopCount();
+                logRrepEvent("fwd", rrep->getSrcId(), rrep->getDstId(), fwd.getDestination(), packet->getVia(), fwd.getVia(), hopc, fi);
                 
                 // RFC3561 RREP-ACK: Schedule timeout if A-bit is set
                 if (aodvEnableRrepAck && rrep->getAckRequired()) {
@@ -2112,35 +2129,21 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
 // Log the full RREP path once it reaches the original source (this node)
 void LoRaNodeApp::logRrepFinalPath(const aodv::Rrep* rrep) {
     if (!rrep) return;
-    try {
-        ensurePathsDir();
-        char path[512];
-        sprintf(path, "results/paths/rrep_path.csv");
-        bool writeHeader=false; { std::ifstream c(path); writeHeader=!c.good(); }
-        std::ofstream out(path, std::ios::app);
-        if (!out.is_open()) return;
-    if (writeHeader) out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount,path" << std::endl;
-    std::string p; int n = rrep->getPathArraySize();
-    for (int i=0;i<n;i++){ if(i) p+="-"; p+=std::to_string(rrep->getPath(i)); }
-    out << simTime() << ",final," << nodeId << "," << rrep->getSrcId() << "," << rrep->getDstId() << ",,,," << rrep->getHopCount() << "," << p << std::endl;
-        out.close();
-    } catch(...) {}
+    // Use unified logRrepEvent with "final" event type
+    logRrepEvent("final", rrep->getSrcId(), rrep->getDstId(), -1, -1, -1, rrep->getHopCount(), rrep);
 }
 
-// Append an AODV RREQ arrival to CSV under results/paths
+// Log AODV RREQ processing at any node (destination or intermediate)
 void LoRaNodeApp::logRreqAtDestination(const aodv::Rreq* rreq) {
+    static bool rreqFileCleared = false;
     try {
         ensurePathsDir();
         char path[512];
         sprintf(path, "results/paths/rreq_path.csv");
-        // Check if file exists
-        bool writeHeader = false;
-        {
-            std::ifstream check(path);
-            writeHeader = !check.good();
-        }
-        std::ofstream out(path, std::ios::app);
+        bool writeHeader = !rreqFileCleared;
+        std::ofstream out(path, rreqFileCleared ? std::ios::app : std::ios::trunc);
         if (!out.is_open()) return;
+        rreqFileCleared = true;
         if (writeHeader) {
             out << "simTime,atNode,srcId,dstId,bcastId,hopCount,srcSeq,path" << std::endl;
         }
@@ -2204,25 +2207,28 @@ simtime_t LoRaNodeApp::sendAodvPacket() {
 }
 
 // Unified logger for RREP events (reception / forwarding)
-void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount) {
+void LoRaNodeApp::logRrepEvent(const char *eventType, int originSrc, int finalDst, int envelopeDest, int envelopeVia, int nextHop, int hopCount, const aodv::Rrep* rrep) {
+    static bool rrepFileCleared = false;
     try {
         ensurePathsDir();
         char path[512];
         sprintf(path, "results/paths/rrep_path.csv");
-        bool writeHeader = false;
-        {
-            std::ifstream check(path);
-            writeHeader = !check.good();
-        }
-        std::ofstream out(path, std::ios::app);
+        bool writeHeader = !rrepFileCleared;
+        std::ofstream out(path, rrepFileCleared ? std::ios::app : std::ios::trunc);
         if (!out.is_open()) {
             EV << "AODV: Failed to open RREP forwarders log file: " << path << endl;
             return;
         }
+        rrepFileCleared = true;
         if (writeHeader) {
             out << "simTime,event,nodeId,originSrc,finalDst,envelopeDest,envelopeVia,nextHop,hopCount,path" << std::endl;
         }
-        out << simTime() << "," << eventType << "," << nodeId << "," << originSrc << "," << finalDst << "," << envelopeDest << "," << envelopeVia << "," << nextHop << "," << hopCount << "," << "" << std::endl;
+        std::string p="";
+        if (rrep) {
+            int ps = rrep->getPathArraySize();
+            for (int i=0;i<ps;i++){ if(i) p+="-"; p+=std::to_string(rrep->getPath(i)); }
+        }
+        out << simTime() << "," << eventType << "," << nodeId << "," << originSrc << "," << finalDst << "," << envelopeDest << "," << envelopeVia << "," << nextHop << "," << hopCount << "," << p << std::endl;
         out.close();
     } catch (...) {
         // swallow
@@ -3148,23 +3154,44 @@ void LoRaNodeApp::logRoutingTableSnapshot(const char* eventType) {
     } catch (...) {}
 }
 
-// Log final path of delivered DATA packets (only at final destination)
-void LoRaNodeApp::logDataDeliveryPath(const LoRaAppPacket* packet) {
+// Log data packet transmission at source node
+void LoRaNodeApp::logDataTransmission(const LoRaAppPacket* packet) {
     if (!packet || packet->getMsgType() != DATA) return;
-    if (packet->getDestination() != nodeId) return;
+    if (packet->getSource() != nodeId) return; // Only log at source
+    static bool txFileCleared = false;
+    try {
+        ensurePathsDir();
+        char path[512];
+        sprintf(path, "results/paths/data_tx.csv");
+        bool writeHeader = !txFileCleared;
+        std::ofstream out(path, txFileCleared ? std::ios::app : std::ios::trunc);
+        if (!out.is_open()) return;
+        txFileCleared = true;
+        if (writeHeader) {
+            out << "simTime,srcId,dstId,seqNum,len,via" << std::endl;
+        }
+        out << simTime() << "," << packet->getSource() << "," << packet->getDestination() 
+            << "," << packet->getDataInt() << "," << packet->getByteLength() 
+            << "," << packet->getVia() << std::endl;
+        out.close();
+    } catch (...) {}
+}
+
+// Log data packet reception at destination only
+void LoRaNodeApp::logDataReception(const LoRaAppPacket* packet) {
+    if (!packet || packet->getMsgType() != DATA) return;
+    if (packet->getDestination() != nodeId) return; // Only log at destination
+    static bool rxFileCleared = false;
     try {
         ensurePathsDir();
         char path[512];
         sprintf(path, "results/paths/data_path.csv");
-        bool writeHeader = false;
-        {
-            std::ifstream check(path);
-            writeHeader = !check.good();
-        }
-        std::ofstream out(path, std::ios::app);
+        bool writeHeader = !rxFileCleared;
+        std::ofstream out(path, rxFileCleared ? std::ios::app : std::ios::trunc);
         if (!out.is_open()) return;
+        rxFileCleared = true;
         if (writeHeader) {
-            out << "simTime,srcId,dstId,len,hops,path" << std::endl;
+            out << "simTime,atNode,srcId,dstId,seqNum,len,hops,path" << std::endl;
         }
         std::string p;
         int n = packet->getHopTraceArraySize();
@@ -3172,11 +3199,15 @@ void LoRaNodeApp::logDataDeliveryPath(const LoRaAppPacket* packet) {
             if (i) p += "-";
             p += std::to_string(packet->getHopTrace(i));
         }
-        out << simTime() << "," << packet->getSource() << "," << packet->getDestination() << "," << packet->getByteLength() << "," << n << "," << p << std::endl;
+        out << simTime() << "," << nodeId << "," << packet->getSource() << "," << packet->getDestination() 
+            << "," << packet->getDataInt() << "," << packet->getByteLength() << "," << n << "," << p << std::endl;
         out.close();
-    } catch (...) {
-        // ignore logging failures
-    }
+    } catch (...) {}
+}
+
+// Log final path of delivered DATA packets (kept for compatibility, now delegates to logDataReception)
+void LoRaNodeApp::logDataDeliveryPath(const LoRaAppPacket* packet) {
+    logDataReception(packet);
 }
 
 simtime_t LoRaNodeApp::getTimeToNextRoutingPacket() {
