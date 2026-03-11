@@ -7,6 +7,7 @@ Usage: set in your INI:
   **.loRaRescueNodes[*].mobility.turtleScript = xmldoc("turtle_stationary_0mps.xml")
 -->
 <movement>
+    <set x="1500" y="1500"/>
     <!-- Set minimal speed (TurtleMobility requires speed > 0) -->
     <set speed="0.001"/>
 

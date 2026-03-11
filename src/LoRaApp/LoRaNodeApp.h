@@ -98,6 +98,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void logDataTransmission(const LoRaAppPacket* packet);
     // Log data packet reception at destination only
     void logDataReception(const LoRaAppPacket* packet);
+    // Log per-node processing of data packets (send, forward, deliver)
+    void logDataProcessing(const LoRaAppPacket* packet, const char *event);
     // Log final delivered data packet path (delegates to logDataReception)
     void logDataDeliveryPath(const LoRaAppPacket* packet);
     // Log final RREP full path when it reaches the original source

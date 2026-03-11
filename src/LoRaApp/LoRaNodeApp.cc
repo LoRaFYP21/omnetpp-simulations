@@ -1090,9 +1090,11 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
     else if (packet->getDestination() == nodeId) {
         bubble("I received a data packet for me!");
 
-    std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
-    // Log reception at destination
-    logDataReception(packet);
+        std::cout << "msg type at dest: " << packet->getMsgType() << std::endl;
+
+        // Log per-node processing and destination reception
+        logDataProcessing(packet, "deliver");
+        logDataReception(packet);
 
         manageReceivedPacketForMe(packet);
         if (firstDataPacketReceptionTime == 0) {
@@ -1106,7 +1108,11 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
     }
     // Else it can be a data packet from and to other nodes...
     else {
-        // which we may forward, if it is being broadcast
+        // which we may forward
+        // Log that this node is processing a data packet it has received (potential forwarder)
+        logDataProcessing(packet, "recv");
+
+        // If it is being broadcast and we are in route discovery mode
         if (packet->getVia() == BROADCAST_ADDRESS && routeDiscovery == true) {
 
             std::cout << "msg type broadcast and route : " << packet->getMsgType() << std::endl;
@@ -1819,6 +1825,11 @@ simtime_t LoRaNodeApp::sendDataPacket() {
         // Log transmission if this is a local data packet from this source
         if (localData && dataPacket->getMsgType() == DATA) {
             logDataTransmission(dataPacket);
+        }
+
+        // Log per-node processing for any DATA packet we are about to transmit
+        if (dataPacket->getMsgType() == DATA) {
+            logDataProcessing(dataPacket, localData ? "send" : "fwd-tx");
         }
         
         send(dataPacket, "appOut");
@@ -3201,6 +3212,35 @@ void LoRaNodeApp::logDataReception(const LoRaAppPacket* packet) {
         }
         out << simTime() << "," << nodeId << "," << packet->getSource() << "," << packet->getDestination() 
             << "," << packet->getDataInt() << "," << packet->getByteLength() << "," << n << "," << p << std::endl;
+        out.close();
+    } catch (...) {}
+}
+
+// Log every node that processes a DATA packet (send, forward, deliver)
+void LoRaNodeApp::logDataProcessing(const LoRaAppPacket* packet, const char *event) {
+    if (!packet || packet->getMsgType() != DATA) return;
+    if (!event) event = "unknown";
+    static bool procFileCleared = false;
+    try {
+        ensurePathsDir();
+        char path[512];
+        sprintf(path, "results/paths/data_process.csv");
+        bool writeHeader = !procFileCleared;
+        std::ofstream out(path, procFileCleared ? std::ios::app : std::ios::trunc);
+        if (!out.is_open()) return;
+        procFileCleared = true;
+        if (writeHeader) {
+            out << "simTime,event,atNode,srcId,dstId,seqNum,len,via,hops,path" << std::endl;
+        }
+        std::string p;
+        int n = packet->getHopTraceArraySize();
+        for (int i = 0; i < n; ++i) {
+            if (i) p += "-";
+            p += std::to_string(packet->getHopTrace(i));
+        }
+        out << simTime() << "," << event << "," << nodeId << "," << packet->getSource() << "," << packet->getDestination()
+            << "," << packet->getDataInt() << "," << packet->getByteLength() << "," << packet->getVia()
+            << "," << n << "," << p << std::endl;
         out.close();
     } catch (...) {}
 }
