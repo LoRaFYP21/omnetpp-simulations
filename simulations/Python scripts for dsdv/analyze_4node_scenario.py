@@ -21,7 +21,7 @@ PATHS_CSV = os.path.join("delivered_packets", "paths.csv")
 OUTPUT_DIR = "analysis reports"
 END_NODE_IDS = [1000, 1001, 1002, 1003]
 RESCUE_NODE_ID = 2000
-EXPECTED_PACKETS_PER_NODE = 20
+DEFAULT_EXPECTED_PACKETS_PER_NODE = 20
 
 def parse_mobile_speed_from_sca(sca_path):
     """Extract mobile speed from turtle script parameter in .sca file."""
@@ -129,6 +129,7 @@ def analyze_4node_paths():
     
     results = []
     total_tx_src = 0
+    total_unique_sent = 0
     total_delivered = 0
     total_transmissions_all = 0
     total_packets_delivered_at_least_once = 0
@@ -137,9 +138,11 @@ def analyze_4node_paths():
         tx_count = tx_src_count[node_id]
         unique_tx_packets = len(tx_src_packets[node_id])
         delivered_count = len(delivered_packets[node_id])
-        
-        # Calculate PDR for this node
-        pdr = (float(delivered_count) / EXPECTED_PACKETS_PER_NODE * 100) if EXPECTED_PACKETS_PER_NODE > 0 else 0
+
+        # Calculate PDR for this node.
+        # Use observed unique TX_SRC packets as denominator to avoid impossible (>100%) PDR.
+        pdr_denom = unique_tx_packets if unique_tx_packets > 0 else DEFAULT_EXPECTED_PACKETS_PER_NODE
+        pdr = (float(delivered_count) / pdr_denom * 100) if pdr_denom > 0 else 0
         
         # Calculate total transmissions for delivered packets from this node
         transmissions_for_delivered = 0
@@ -155,21 +158,25 @@ def analyze_4node_paths():
             'tx_src_count': tx_count,
             'unique_tx_packets': unique_tx_packets,
             'delivered_count': delivered_count,
+            'pdr_denom': pdr_denom,
             'pdr': pdr,
             'transmissions_for_delivered': transmissions_for_delivered,
             'avg_tx_per_delivered': avg_tx_per_delivered
         })
         
         total_tx_src += tx_count
+        total_unique_sent += unique_tx_packets
         total_delivered += delivered_count
         total_transmissions_all += transmissions_for_delivered
         if delivered_count > 0:
             total_packets_delivered_at_least_once += delivered_count
     
     # Calculate overall metrics
-    overall_pdr = (float(total_delivered) / (len(END_NODE_IDS) * EXPECTED_PACKETS_PER_NODE) * 100)
+    overall_denom = total_unique_sent if total_unique_sent > 0 else (len(END_NODE_IDS) * DEFAULT_EXPECTED_PACKETS_PER_NODE)
+    overall_pdr = (float(total_delivered) / overall_denom * 100) if overall_denom > 0 else 0
     overall_avg_tx_per_delivered = (float(total_transmissions_all) / total_delivered) if total_delivered > 0 else 0
     avg_delivered_per_node = float(total_delivered) / len(END_NODE_IDS)
+    avg_sent_per_node = float(total_unique_sent) / len(END_NODE_IDS) if len(END_NODE_IDS) > 0 else 0
     
     # Find and parse .sca file for routing protocol and mobile speed
     sca_files = glob.glob(os.path.join("results", "*.sca"))
@@ -209,8 +216,9 @@ def analyze_4node_paths():
         f.write("Routing Mode: {}\n".format(routing_mode))
         f.write("Mobile Node Speed: {}\n".format(mobile_speed))
         f.write("Total Network Energy Consumed: {:.2f} J\n".format(total_energy))
-        f.write("Expected: {} end nodes x {} packets = {} total packets\n".format(
-            len(END_NODE_IDS), EXPECTED_PACKETS_PER_NODE, len(END_NODE_IDS) * EXPECTED_PACKETS_PER_NODE))
+        f.write("Configured expected (fallback only): {} end nodes x {} packets = {} total packets\n".format(
+            len(END_NODE_IDS), DEFAULT_EXPECTED_PACKETS_PER_NODE, len(END_NODE_IDS) * DEFAULT_EXPECTED_PACKETS_PER_NODE))
+        f.write("Observed unique packets sent (TX_SRC): {}\n".format(total_unique_sent))
         f.write("Rescue Node ID: {}\n".format(RESCUE_NODE_ID))
         f.write("\n")
         
@@ -224,7 +232,7 @@ def analyze_4node_paths():
             f.write("  Data Packets Transmitted (TX_SRC):        {}\n".format(result['tx_src_count']))
             f.write("  Unique Packet IDs Transmitted:            {}\n".format(result['unique_tx_packets']))
             f.write("  Packets Delivered to Rescue Node:         {} / {}\n".format(
-                result['delivered_count'], EXPECTED_PACKETS_PER_NODE))
+                result['delivered_count'], result['pdr_denom']))
             f.write("  Packet Delivery Ratio (PDR):              {:.2f}%\n".format(result['pdr']))
             f.write("  Total Transmissions (all nodes for delivered): {}\n".format(result['transmissions_for_delivered']))
             f.write("  Avg Transmissions per Delivered Packet:   {:.2f}\n".format(result['avg_tx_per_delivered']))
@@ -237,10 +245,10 @@ def analyze_4node_paths():
         
         f.write("Total TX_SRC Events (all end nodes):             {}\n".format(total_tx_src))
         f.write("Total Packets Delivered to Rescue Node:          {} / {}\n".format(
-            total_delivered, len(END_NODE_IDS) * EXPECTED_PACKETS_PER_NODE))
+            total_delivered, overall_denom))
         f.write("Overall PDR (all end nodes combined):            {:.2f}%\n".format(overall_pdr))
-        f.write("Average Packets Delivered per End Node:          {:.2f} / {}\n".format(
-            avg_delivered_per_node, EXPECTED_PACKETS_PER_NODE))
+        f.write("Average Packets Delivered per End Node:          {:.2f} / {:.2f}\n".format(
+            avg_delivered_per_node, avg_sent_per_node))
         f.write("Total Network Energy Consumed:                   {:.2f} J\n".format(total_energy))
         f.write("\n")
         f.write("NETWORK OVERHEAD ANALYSIS:\n")
@@ -256,12 +264,12 @@ def analyze_4node_paths():
         f.write("-"*80 + "\n\n")
         f.write("Rescue Node ID: {}\n".format(RESCUE_NODE_ID))
         f.write("Total Unique Packets Received: {}\n".format(total_delivered))
-        f.write("Expected Total Packets: {}\n".format(len(END_NODE_IDS) * EXPECTED_PACKETS_PER_NODE))
+        f.write("Total Unique Packets Sent (TX_SRC): {}\n".format(overall_denom))
         f.write("Reception Success Rate: {:.2f}%\n".format(overall_pdr))
         f.write("\nBreakdown by Source End Node:\n")
         for result in results:
             f.write("  From Node {}: {}/{} packets ({:.2f}%)\n".format(
-                result['node_id'], result['delivered_count'], EXPECTED_PACKETS_PER_NODE, result['pdr']))
+                result['node_id'], result['delivered_count'], result['pdr_denom'], result['pdr']))
         
         f.write("\n" + "="*80 + "\n")
     
@@ -274,14 +282,14 @@ def analyze_4node_paths():
     for result in results:
         print("Node {}: TX_SRC={}, Delivered={}/{}, PDR={:.2f}%, Avg TX/Delivered={:.2f}".format(
             result['node_id'], result['tx_src_count'], result['delivered_count'], 
-            EXPECTED_PACKETS_PER_NODE, result['pdr'], result['avg_tx_per_delivered']))
+            result['pdr_denom'], result['pdr'], result['avg_tx_per_delivered']))
     
     print("\nOVERALL SUMMARY:")
     print("-" * 80)
     print("Total Packets Sent (TX_SRC): {}".format(total_tx_src))
-    print("Total Packets Delivered: {}/{}".format(total_delivered, len(END_NODE_IDS) * EXPECTED_PACKETS_PER_NODE))
+    print("Total Packets Delivered: {}/{}".format(total_delivered, overall_denom))
     print("Overall PDR: {:.2f}%".format(overall_pdr))
-    print("Average Delivered per Node: {:.2f}/{}".format(avg_delivered_per_node, EXPECTED_PACKETS_PER_NODE))
+    print("Average Delivered per Node: {:.2f}/{:.2f}".format(avg_delivered_per_node, avg_sent_per_node))
     print("Total Network Energy: {:.2f} J".format(total_energy))
     print("\nNetwork Overhead: {:.2f} transmissions per delivered packet".format(overall_avg_tx_per_delivered))
     
