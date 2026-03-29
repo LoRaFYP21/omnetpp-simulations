@@ -27,6 +27,11 @@ module LoRaNode
         int numberOfNodes = default(1);       // Required by LoRaNodeApp
         int numberOfEndNodes = default(1);    // Required by LoRaNodeApp
         string deploymentType = default("");
+        // Optional overrides for "grid" deployment (used by LoRaNodeApp)
+        // gridCols <= 0: legacy behavior (cols = sqrt(numberOfNodes))
+        int gridCols = default(-1);
+        // gridJitter: random displacement added to grid coordinates (meters)
+        double gridJitter @unit(m) = default(100m);
         double minX @unit(m) = default(0m);
         double maxX @unit(m) = default(1000m);
         double sepX @unit(m) = default(1000m);
