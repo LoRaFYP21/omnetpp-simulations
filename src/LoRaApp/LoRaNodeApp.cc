@@ -1159,6 +1159,10 @@ void LoRaNodeApp::finish() {
 void LoRaNodeApp::handleMessage(cMessage *msg) {
     // If node already failed, drop everything except to process (already processed) failure event
     if (failed) {
+        // If any module-owned timers slip through after failure, clear pointers to avoid
+        // double-deletes later (e.g., finish() cleanup).
+        if (msg == dsdvIncrementalTimer) dsdvIncrementalTimer = nullptr;
+        if (msg == dsdvFullTimer) dsdvFullTimer = nullptr;
         delete msg;
         return;
     }
@@ -4295,6 +4299,18 @@ void LoRaNodeApp::performFailure() {
     failureTime = simTime();
     // Cancel any future transmissions
     if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
+
+    // Cancel protocol timers so the node becomes inert even if additional protocols are enabled.
+    // (These timers don't exist in the original failure-only branch, but they do on main.)
+    if (dsdvIncrementalTimer) {
+        cancelAndDelete(dsdvIncrementalTimer);
+        dsdvIncrementalTimer = nullptr;
+    }
+    if (dsdvFullTimer) {
+        cancelAndDelete(dsdvFullTimer);
+        dsdvFullTimer = nullptr;
+    }
+
     // Release failureEvent (processed)
     if (failureEvent) {
         delete failureEvent;
