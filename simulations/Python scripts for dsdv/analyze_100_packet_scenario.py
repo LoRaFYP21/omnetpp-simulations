@@ -6,6 +6,18 @@ from pathlib import Path
 from datetime import datetime
 
 
+def find_simulations_root(start_dir: Path) -> Path:
+    """Find the `simulations/` folder regardless of where this script lives.
+
+    We detect it by walking upward until a `delivered_packets/` folder exists.
+    """
+    for candidate in (start_dir, *start_dir.parents):
+        if (candidate / "delivered_packets").exists():
+            return candidate
+    # Fallback: keep original behavior
+    return start_dir
+
+
 def parse_initial_distance_from_ini(ini_path: Path) -> str:
     """Extract initial distance between end node and rescue node from INI file.
     
@@ -211,17 +223,14 @@ def analyze_paths_csv(
     for seq in expected_range:
         print(f"{seq},{delivered_counts.get(seq, 0)}")
 
-    # Write summary report to text file in analysis reports folder
-    output_dir = paths_path.parent.parent  # Go from delivered_packets to simulations
-    reports_dir = output_dir / "analysis reports"
-    reports_dir.mkdir(exist_ok=True)
+    # Write outputs next to this script (regardless of where inputs live)
+    reports_dir = Path(__file__).resolve().parent
     
     # Generate filename: ROUTING_speed_distance_timestamp.txt
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_filename = f"{routing_mode}_{mobile_speed}_{initial_distance}_{timestamp}"
     
     summary_file = reports_dir / f"{base_filename}.txt"
-    details_csv = reports_dir / f"{base_filename}_details.csv"
 
     with summary_file.open("w") as f:
         f.write("=== 100-packet scenario analysis ===\n")
@@ -247,20 +256,9 @@ def analyze_paths_csv(
         f.write(f"- PDR: {pdr:.2f}%\n")
         f.write(f"- Avg Latency: {avg_latency:.4f}s\n")
         f.write(f"- Unique Nodes: {num_unique_nodes}\n")
-        f.write(f"\nDetailed per-packet delivery counts saved to: {details_csv.name}\n")
-
-    # Write per-packet details to CSV
-    with details_csv.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["packetSeq", "delivered_copies", "delivered_at_least_once"])
-        for seq in expected_range:
-            copies = delivered_counts.get(seq, 0)
-            delivered = "YES" if copies > 0 else "NO"
-            writer.writerow([seq, copies, delivered])
 
     print()
     print(f"Summary report saved to: {summary_file}")
-    print(f"Detailed CSV saved to: {details_csv}")
 
     # Append row to summary CSV in analysis reports folder
     summary_csv_path = reports_dir / "simulation_results_summary.csv"
@@ -304,7 +302,7 @@ def analyze_paths_csv(
 
 if __name__ == "__main__":
     # Default to the paths.csv in the delivered_packets folder next to this script
-    base = Path(__file__).resolve().parent
+    base = find_simulations_root(Path(__file__).resolve().parent)
     default_paths = base / "delivered_packets" / "paths.csv"
 
     # Try to find INI file (in same directory as script)

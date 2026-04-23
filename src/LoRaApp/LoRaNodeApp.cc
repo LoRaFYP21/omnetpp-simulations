@@ -49,6 +49,89 @@ namespace inet {
 Define_Module (LoRaNodeApp);
 
 // ---------------------------------------------------------------------------
+// Node failure log (delivered_packets/node_failures.txt)
+// - Overwritten each simulation run
+// - If no node fails, file contains: "no node failures"
+// - If nodes fail, file contains CSV with one line per failed node
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool failureLogClearedThisRun = false;
+bool anyNodeFailedThisRun = false;
+
+std::string nodeRoleFromId(int id) {
+    if (id >= 2000) return "rescue";
+    if (id >= 1000) return "end";
+    return "relay";
+}
+
+std::string failureLogPath() {
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("delivered_packets");
+    std::stringstream ss;
+    ss << folder << sep << "node_failures.txt";
+    return ss.str();
+}
+
+void clearFailureLogForRun() {
+    // Ensure directory exists and truncate file.
+#ifdef _WIN32
+    _mkdir("delivered_packets");
+#else
+    mkdir("delivered_packets", 0775);
+#endif
+    std::ofstream f(failureLogPath(), std::ios::out | std::ios::trunc);
+    if (f.is_open()) {
+        f.close();
+    }
+    failureLogClearedThisRun = true;
+    anyNodeFailedThisRun = false;
+}
+
+void appendNodeFailure(int nodeId, simtime_t when) {
+    if (!failureLogClearedThisRun) {
+        clearFailureLogForRun();
+    }
+
+    const std::string path = failureLogPath();
+
+    // On first failure, rewrite file with a simple header.
+    if (!anyNodeFailedThisRun) {
+        std::ofstream hf(path, std::ios::out | std::ios::trunc);
+        if (hf.is_open()) {
+            hf << "simTime,nodeId,role" << std::endl;
+            hf.close();
+        }
+    }
+
+    std::ofstream f(path, std::ios::out | std::ios::app);
+    if (!f.is_open()) return;
+    f << when << "," << nodeId << "," << nodeRoleFromId(nodeId) << std::endl;
+    f.close();
+
+    anyNodeFailedThisRun = true;
+}
+
+void finalizeFailureLogIfNone() {
+    if (!failureLogClearedThisRun) {
+        clearFailureLogForRun();
+    }
+    if (anyNodeFailedThisRun) return;
+
+    std::ofstream f(failureLogPath(), std::ios::out | std::ios::trunc);
+    if (!f.is_open()) return;
+    f << "no node failures" << std::endl;
+    f.close();
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
 // Routing Metric Enum Mapping (documentation)
 // NO_FORWARDING (0)                : Node generates/receives only; no forwarding logic.
 // FLOODING_BROADCAST_SINGLE_SF (1) : Blind broadcast forwarding using a single SF.
@@ -180,6 +263,11 @@ void LoRaNodeApp::initialize(int stage) {
             }
             // Reset the flag used in ensurePathLogInitialized so it knows file already has header
             pathLogReady = false; // will be set true on first ensurePathLogInitialized() call
+
+            // Fresh node failure log per simulation run (overwritten each run)
+            // This will remain empty until a node fails; at finish we write "no node failures" if still empty.
+            failureLogClearedThisRun = false;
+            clearFailureLogForRun();
         }
         std::pair<double, double> coordsValues = std::make_pair(-1, -1);
         cModule *host = getContainingNode(this);
@@ -1042,6 +1130,11 @@ void LoRaNodeApp::finish() {
     // files node_<id>_routing.csv produced by logRoutingSnapshot().
     if (hasPar("exportDetailedRoutingTables") && par("exportDetailedRoutingTables").boolValue()) {
         exportRoutingTables();
+    }
+
+    // Finalize node failure log once per run: if nobody failed, write "no node failures".
+    if (nodeId == 0) {
+        finalizeFailureLogIfNone();
     }
 
     recordScalar("sentPackets", sentPackets);
@@ -4277,6 +4370,7 @@ simtime_t LoRaNodeApp::calculateTransmissionDuration(cMessage *msg) {
     return duration;
 }
 
+
 // ---------------- Failure handling & export helpers ----------------
 
 void LoRaNodeApp::scheduleFailure() {
@@ -4316,6 +4410,10 @@ void LoRaNodeApp::performFailure() {
         delete failureEvent;
         failureEvent = nullptr;
     }
+
+    // Append a failure record to delivered_packets/node_failures.txt
+    appendNodeFailure(nodeId, failureTime);
+
     bubble("Node FAILED (simulated random failure)");
     // Record immediate scalars if not already
     recordScalar("failed", 1);
