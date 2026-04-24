@@ -42,6 +42,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SIM_ROOT = find_simulations_root(SCRIPT_DIR)              # simulations/
 RESULTS_DIR = SIM_ROOT / "results"                        # simulations/results
 PATHS_CSV = SIM_ROOT / "delivered_packets" / "paths.csv"
+SUMMARY_CSV = SCRIPT_DIR / "summary.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,18 @@ def fmt_f(v, dp=4):
     if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
         return "nan"
     return f"{v:.{dp}f}"
+
+
+def append_summary_row(summary_csv: Path, fieldnames, row_dict) -> None:
+    """Append a single run summary row to summary_csv, creating header if needed."""
+    summary_csv = Path(summary_csv)
+    write_header = (not summary_csv.exists()) or summary_csv.stat().st_size == 0
+
+    with summary_csv.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +363,7 @@ def analyze_1vic_20grid():
     failure_label = detect_failure_status_from_sca(sca_path)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    generated_iso = datetime.now().isoformat(timespec="seconds")
     dist_label = f"{round(distance_m)}" if not math.isnan(distance_m) else "unknown"
     report_name = f"{routing_label}_{dist_label}_{timestamp}_1VIC_{failure_label}_20grid.txt"
     report_path = SCRIPT_DIR / report_name
@@ -394,6 +408,65 @@ def analyze_1vic_20grid():
 
     with report_path.open("w", encoding="utf-8") as fh:
         fh.write(report_text)
+
+    # ------------------------------------------------------------------
+    # Append summary CSV row (one row per run)
+    # ------------------------------------------------------------------
+    summary_fields = [
+        "generated",
+        "routing",
+        "failure",
+        "distance_label_m",
+        "distance_m",
+        "packets_sent",
+        "packets_delivered",
+        "pdr_percent",
+        "avg_latency_s",
+        "median_latency_s",
+        "stdev_latency_s",
+        "min_latency_s",
+        "max_latency_s",
+        "total_energy_j",
+        "src_x_m",
+        "src_y_m",
+        "dst_x_m",
+        "dst_y_m",
+        "avg_time_on_air_s",
+        "avg_tx_per_delivered",
+        "sca_file",
+        "report_file",
+    ]
+
+    summary_row = {
+        "generated": generated_iso,
+        "routing": routing_label,
+        "failure": failure_label,
+        "distance_label_m": dist_label,
+        "distance_m": distance_m,
+        "packets_sent": num_sent,
+        "packets_delivered": num_delivered,
+        "pdr_percent": pdr,
+        "avg_latency_s": avg_latency,
+        "median_latency_s": median_latency,
+        "stdev_latency_s": stdev_latency,
+        "min_latency_s": min_latency,
+        "max_latency_s": max_latency,
+        "total_energy_j": total_energy,
+        "src_x_m": src_x,
+        "src_y_m": src_y,
+        "dst_x_m": dst_x,
+        "dst_y_m": dst_y,
+        "avg_time_on_air_s": overall_avg_time_on_air,
+        "avg_tx_per_delivered": overall_avg_tx_per_delivered,
+        "sca_file": sca_name,
+        "report_file": report_name,
+    }
+
+    try:
+        append_summary_row(SUMMARY_CSV, summary_fields, summary_row)
+        print(f"Summary appended -> {SUMMARY_CSV}")
+    except Exception as e:
+        print(f"WARNING: could not append summary CSV: {e}")
 
     print(f"Report written -> {report_path}")
     print(report_text)

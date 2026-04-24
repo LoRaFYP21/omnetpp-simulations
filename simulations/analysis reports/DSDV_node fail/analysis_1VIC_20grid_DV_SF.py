@@ -6,7 +6,7 @@ Reads simulations/delivered_packets/paths.csv and the most recent .sca file
 in simulations/results/, then writes one TXT report into this folder.
 
 Output filename format:
-    <DV or SF>_<distance_m>_<YYYYMMDD_HHMMSS>_1VIC_20grid.txt
+    <DV or SF>_<distance_m>_<YYYYMMDD_HHMMSS>_1VIC_<NodeFail|NoFail>_20grid.txt
 
 Routing label is detected from paths.csv:
     - If any nextHopType == UNICAST  -> "DV"
@@ -26,6 +26,7 @@ import math
 import statistics
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 # Paths
 
@@ -41,6 +42,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SIM_ROOT = find_simulations_root(SCRIPT_DIR)              # simulations/
 RESULTS_DIR = SIM_ROOT / "results"                        # simulations/results
 PATHS_CSV = SIM_ROOT / "delivered_packets" / "paths.csv"
+SUMMARY_CSV = SCRIPT_DIR / "summary.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +75,92 @@ def parse_sca(sca_path: Path):
     return scalars
 
 
+def parse_sca_params(sca_path: Path):
+    """Parse an OMNeT++ .sca file's `param` lines into dict[paramName] -> rawValueString."""
+    params = {}
+    with sca_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line.startswith("param "):
+                # format: param <name> <value>
+                # Note: <name> itself can include spaces? In OMNeT++ it usually doesn't.
+                # We'll split into 3 parts only to preserve raw values.
+                parts = line.split(maxsplit=2)
+                if len(parts) == 3:
+                    _, name, raw_value = parts
+                    params[name] = raw_value.strip()
+    return params
+
+
+def _parse_time_like_seconds(raw_value: str):
+    """Best-effort parse '5s'/'0s'/'-1s' into float seconds; return None on failure."""
+    v = raw_value.strip().strip('"')
+    if v.endswith("s"):
+        try:
+            return float(v[:-1])
+        except ValueError:
+            return None
+    return None
+
+
+def detect_failure_status_from_sca(sca_path: Optional[Path]) -> str:
+    """Return 'NodeFail' or 'NoFail' based on failure-related params in the .sca."""
+    if sca_path is None or not sca_path.exists():
+        return "UnknownFail"
+
+    # Fast path: check iteration variables/metadata first (covers cases where failure
+    # settings are expressed via iteration vars but not repeated as params).
+    try:
+        with sca_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("itervar relayFailCount "):
+                    try:
+                        if int(line.split()[-1]) > 0:
+                            return "NodeFail"
+                    except ValueError:
+                        pass
+                if line.startswith("attr iterationvars ") or line.startswith("attr measurement "):
+                    if "relayFailCount=" in line or "timeToFailure" in line:
+                        return "NodeFail"
+                # Stop scanning early once we're past the header/params section.
+                if line.startswith("scalar "):
+                    break
+    except Exception:
+        pass
+
+    params = parse_sca_params(sca_path)
+
+    # 1) Coordinated subset failure mode
+    subset_raw = params.get("**.loRaNodes[*].LoRaNodeApp.globalFailureSubsetCount")
+    if subset_raw is not None:
+        try:
+            subset_count = int(str(subset_raw).strip().strip('"'))
+        except ValueError:
+            subset_count = None
+        if subset_count is not None and subset_count > 0:
+            return "NodeFail"
+
+    # 2) Per-node failure mode (timeToFailure)
+    ttf_raw = params.get("**.loRaNodes[*].LoRaNodeApp.timeToFailure")
+    if ttf_raw is not None:
+        ttf = ttf_raw.strip().strip('"')
+
+        # Expressions like uniform(0s,5000s) indicate failures are enabled.
+        if "(" in ttf and ")" in ttf:
+            if ttf.startswith("uniform") or ttf.startswith("exponential") or ttf.startswith("normal"):
+                return "NodeFail"
+
+        # Plain time value like 2500s
+        seconds = _parse_time_like_seconds(ttf)
+        if seconds is not None:
+            if seconds >= 0:
+                return "NodeFail"
+            return "NoFail"  # -1s
+
+    # If neither mode is present, assume failures are not enabled.
+    return "NoFail"
+
+
 def euclidean(x1: float, y1: float, x2: float, y2: float) -> float:
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
@@ -81,6 +169,18 @@ def fmt_f(v, dp=4):
     if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
         return "nan"
     return f"{v:.{dp}f}"
+
+
+def append_summary_row(summary_csv: Path, fieldnames, row_dict) -> None:
+    """Append a single run summary row to summary_csv, creating header if needed."""
+    summary_csv = Path(summary_csv)
+    write_header = (not summary_csv.exists()) or summary_csv.stat().st_size == 0
+
+    with summary_csv.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +360,12 @@ def analyze_1vic_20grid():
     # ------------------------------------------------------------------
     routing_label = detect_routing_type_from_paths(PATHS_CSV)  # "DV" or "SF"
 
+    failure_label = detect_failure_status_from_sca(sca_path)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    generated_iso = datetime.now().isoformat(timespec="seconds")
     dist_label = f"{round(distance_m)}" if not math.isnan(distance_m) else "unknown"
-    report_name = f"{routing_label}_{dist_label}_{timestamp}_1VIC_20grid.txt"
+    report_name = f"{routing_label}_{dist_label}_{timestamp}_1VIC_{failure_label}_20grid.txt"
     report_path = SCRIPT_DIR / report_name
 
     lines = []
@@ -305,6 +408,65 @@ def analyze_1vic_20grid():
 
     with report_path.open("w", encoding="utf-8") as fh:
         fh.write(report_text)
+
+    # ------------------------------------------------------------------
+    # Append summary CSV row (one row per run)
+    # ------------------------------------------------------------------
+    summary_fields = [
+        "generated",
+        "routing",
+        "failure",
+        "distance_label_m",
+        "distance_m",
+        "packets_sent",
+        "packets_delivered",
+        "pdr_percent",
+        "avg_latency_s",
+        "median_latency_s",
+        "stdev_latency_s",
+        "min_latency_s",
+        "max_latency_s",
+        "total_energy_j",
+        "src_x_m",
+        "src_y_m",
+        "dst_x_m",
+        "dst_y_m",
+        "avg_time_on_air_s",
+        "avg_tx_per_delivered",
+        "sca_file",
+        "report_file",
+    ]
+
+    summary_row = {
+        "generated": generated_iso,
+        "routing": routing_label,
+        "failure": failure_label,
+        "distance_label_m": dist_label,
+        "distance_m": distance_m,
+        "packets_sent": num_sent,
+        "packets_delivered": num_delivered,
+        "pdr_percent": pdr,
+        "avg_latency_s": avg_latency,
+        "median_latency_s": median_latency,
+        "stdev_latency_s": stdev_latency,
+        "min_latency_s": min_latency,
+        "max_latency_s": max_latency,
+        "total_energy_j": total_energy,
+        "src_x_m": src_x,
+        "src_y_m": src_y,
+        "dst_x_m": dst_x,
+        "dst_y_m": dst_y,
+        "avg_time_on_air_s": overall_avg_time_on_air,
+        "avg_tx_per_delivered": overall_avg_tx_per_delivered,
+        "sca_file": sca_name,
+        "report_file": report_name,
+    }
+
+    try:
+        append_summary_row(SUMMARY_CSV, summary_fields, summary_row)
+        print(f"Summary appended -> {SUMMARY_CSV}")
+    except Exception as e:
+        print(f"WARNING: could not append summary CSV: {e}")
 
     print(f"Report written -> {report_path}")
     print(report_text)

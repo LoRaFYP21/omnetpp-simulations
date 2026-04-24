@@ -31,9 +31,57 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SIM_ROOT = find_simulations_root(SCRIPT_DIR)
 PATHS_CSV = str(SIM_ROOT / "delivered_packets" / "paths.csv")
 OUTPUT_DIR = str(SCRIPT_DIR)
+SUMMARY_CSV = SCRIPT_DIR / "4vic nodefail summary.csv"
 END_NODE_IDS = [1000, 1001, 1002, 1003]
 RESCUE_NODE_ID = 2000
 DEFAULT_EXPECTED_PACKETS_PER_NODE = 20
+
+
+def append_summary_row(summary_csv: Path, fieldnames, row_dict) -> None:
+    """Append a single summary row; create file + header if needed."""
+    summary_csv = Path(summary_csv)
+    write_header = (not summary_csv.exists()) or summary_csv.stat().st_size == 0
+    with summary_csv.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row_dict)
+
+
+def detect_failure_status_from_sca(sca_path: str) -> str:
+    """Best-effort detect if node failure was enabled for this run."""
+    if not sca_path or not os.path.exists(sca_path):
+        return "UnknownFail"
+    try:
+        with open(sca_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("itervar relayFailCount "):
+                    try:
+                        if int(line.split()[-1]) > 0:
+                            return "NodeFail"
+                    except ValueError:
+                        pass
+                if line.startswith("attr iterationvars ") or line.startswith("attr measurement "):
+                    if "relayFailCount=" in line or "timeToFailure" in line:
+                        return "NodeFail"
+                if line.startswith("param **.loRaNodes[*].LoRaNodeApp.globalFailureSubsetCount"):
+                    try:
+                        v = int(line.split()[-1].strip().strip('"'))
+                        if v > 0:
+                            return "NodeFail"
+                    except ValueError:
+                        pass
+                if line.startswith("param **.loRaNodes[*].LoRaNodeApp.timeToFailure"):
+                    # -1s usually means disabled; any other value/expression implies enabled
+                    if "-1s" in line:
+                        return "NoFail"
+                    return "NodeFail"
+                # Once scalars begin, stop scanning header.
+                if line.startswith("scalar "):
+                    break
+    except Exception:
+        return "UnknownFail"
+    return "NoFail"
 
 def parse_mobile_speed_from_sca(sca_path):
     """Extract mobile speed from turtle script parameter in .sca file."""
@@ -200,6 +248,7 @@ def analyze_4node_paths():
         routing_mode = parse_routing_protocol_from_sca(most_recent_sca)
         mobile_speed = parse_mobile_speed_from_sca(most_recent_sca)
         total_energy = parse_total_energy_from_sca(most_recent_sca)
+        failure_label = detect_failure_status_from_sca(most_recent_sca)
         
         print("\nDetected routing mode: {} (from {})".format(routing_mode, os.path.basename(most_recent_sca)))
         print("Detected mobile speed: {} (from {})".format(mobile_speed, os.path.basename(most_recent_sca)))
@@ -208,6 +257,7 @@ def analyze_4node_paths():
         routing_mode = "unknown"
         mobile_speed = "unknown"
         total_energy = 0.0
+        failure_label = "UnknownFail"
         print("Warning: No .sca files found, routing mode and mobile speed unknown")
     
     # Generate report with new naming format: <routing>_<speed>_<timestamp>_4node_analysis.txt
@@ -227,6 +277,7 @@ def analyze_4node_paths():
         f.write("Source File: {}\n".format(PATHS_CSV))
         f.write("Routing Mode: {}\n".format(routing_mode))
         f.write("Mobile Node Speed: {}\n".format(mobile_speed))
+        f.write("Failure Mode: {}\n".format(failure_label))
         f.write("Total Network Energy Consumed: {:.2f} J\n".format(total_energy))
         f.write("Configured expected (fallback only): {} end nodes x {} packets = {} total packets\n".format(
             len(END_NODE_IDS), DEFAULT_EXPECTED_PACKETS_PER_NODE, len(END_NODE_IDS) * DEFAULT_EXPECTED_PACKETS_PER_NODE))
@@ -284,6 +335,78 @@ def analyze_4node_paths():
                 result['node_id'], result['delivered_count'], result['pdr_denom'], result['pdr']))
         
         f.write("\n" + "="*80 + "\n")
+
+    # ------------------------------------------------------------------
+    # Append summary CSV row (one row per run)
+    # ------------------------------------------------------------------
+    generated_iso = datetime.now().isoformat(timespec="seconds")
+    sca_file_name = os.path.basename(most_recent_sca) if sca_files else "<none>"
+
+    # Flatten per-node metrics into columns for easy pivoting later.
+    fields = [
+        "generated",
+        "routing_mode",
+        "mobile_speed",
+        "failure",
+        "paths_csv",
+        "sca_file",
+        "report_file",
+        "rescue_node_id",
+        "expected_packets_per_node",
+        "total_tx_src_events",
+        "total_unique_sent",
+        "total_delivered",
+        "overall_denom",
+        "overall_pdr_percent",
+        "overall_avg_tx_per_delivered",
+        "total_network_energy_j",
+    ]
+
+    for node_id in END_NODE_IDS:
+        fields += [
+            f"n{node_id}_tx_src_events",
+            f"n{node_id}_unique_sent",
+            f"n{node_id}_delivered",
+            f"n{node_id}_pdr_denom",
+            f"n{node_id}_pdr_percent",
+            f"n{node_id}_tx_for_delivered",
+            f"n{node_id}_avg_tx_per_delivered",
+        ]
+
+    row = {
+        "generated": generated_iso,
+        "routing_mode": routing_mode,
+        "mobile_speed": mobile_speed,
+        "failure": failure_label,
+        "paths_csv": PATHS_CSV,
+        "sca_file": sca_file_name,
+        "report_file": report_filename,
+        "rescue_node_id": RESCUE_NODE_ID,
+        "expected_packets_per_node": DEFAULT_EXPECTED_PACKETS_PER_NODE,
+        "total_tx_src_events": total_tx_src,
+        "total_unique_sent": total_unique_sent,
+        "total_delivered": total_delivered,
+        "overall_denom": overall_denom,
+        "overall_pdr_percent": overall_pdr,
+        "overall_avg_tx_per_delivered": overall_avg_tx_per_delivered,
+        "total_network_energy_j": total_energy,
+    }
+
+    for r in results:
+        node_id = r["node_id"]
+        row[f"n{node_id}_tx_src_events"] = r["tx_src_count"]
+        row[f"n{node_id}_unique_sent"] = r["unique_tx_packets"]
+        row[f"n{node_id}_delivered"] = r["delivered_count"]
+        row[f"n{node_id}_pdr_denom"] = r["pdr_denom"]
+        row[f"n{node_id}_pdr_percent"] = r["pdr"]
+        row[f"n{node_id}_tx_for_delivered"] = r["transmissions_for_delivered"]
+        row[f"n{node_id}_avg_tx_per_delivered"] = r["avg_tx_per_delivered"]
+
+    try:
+        append_summary_row(SUMMARY_CSV, fields, row)
+        print("Summary appended to: {}".format(SUMMARY_CSV))
+    except Exception as e:
+        print("WARNING: could not append summary CSV: {}".format(e))
     
     # Print summary to console
     print("\n" + "="*80)
