@@ -232,6 +232,16 @@ void LoRaNodeApp::performFailure() {
     if (nodeFailed) return;
     nodeFailed = true;
 
+    // GUI-only: tint the containing node red in Qtenv
+    if (hasGUI()) {
+        if (cModule *hostMod = getContainingNode(this)) {
+            cDisplayString& disp = hostMod->getDisplayString();
+            // i[1]=icon tint color, i[2]=icon tint percent
+            disp.setTagArg("i", 1, "red");
+            disp.setTagArg("i", 2, "60");
+        }
+    }
+
     // Cancel own periodic/self scheduling
     if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
     if (configureLoRaParameters && configureLoRaParameters->isScheduled()) cancelEvent(configureLoRaParameters);
