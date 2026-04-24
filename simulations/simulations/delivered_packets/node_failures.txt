@@ -1,6 +1,2 @@
 simTime,nodeId,role
-1830.581777403,12,relay
-3358.022692401,6,relay
-3420.666083433,15,relay
-5564.690841564,18,relay
-6495.4294627,13,relay
+no node failures
