@@ -1,0 +1,669 @@
+Source: src/LoRaApp/LoRaNodeApp.cc
+Purpose: failure-related code excerpts (verbatim), grouped by where they appear.
+
+================================================================================
+EXCERPT 1: initialize() failure configuration + scheduling
+src/LoRaApp/LoRaNodeApp.cc (lines 430-510)
+================================================================================
+
+            // Schedule selfRoutingPackets
+            default:
+                routingPacketsDue = true;
+                nextRoutingPacketTransmissionTime = timeToFirstRoutingPacket;
+                EV << "Time to first routing packet: " << timeToFirstRoutingPacket << endl;
+                break;
+        }
+
+        // Data packets timer
+        timeToFirstDataPacket = math::max(5, par("timeToFirstDataPacket"))+getTimeToNextDataPacket();
+        if (LoRaPacketsToSend.size() > 0) {
+                    dataPacketsDue = true;
+                    nextDataPacketTransmissionTime = timeToFirstDataPacket;
+                    EV << "Time to first data packet: " << timeToFirstDataPacket << endl;
+        }
+
+        // Forward packets timer
+        timeToFirstForwardPacket = math::max(5, par("timeToFirstForwardPacket"))+getTimeToNextForwardPacket();
+        // THis should not happen, though
+        if (LoRaPacketsToForward.size() > 0) {
+                    forwardPacketsDue = true;
+                    nextForwardPacketTransmissionTime = timeToFirstForwardPacket;
+                    EV << "Time to first forward packet: " << timeToFirstForwardPacket << endl;
+        }
+
+
+        selfPacket = new cMessage("selfPacket");
+        EV_INFO << "selfPacket vinuja" <<endl;
+        // Failure scheduling parameters (local + optional global subset override)
+        timeToFailureParam = par("timeToFailure");
+        failureJitterFracParam = par("failureJitterFrac");
+
+        // Global subset logic: only executed once globally, then applied per node
+        initGlobalFailureSelection();
+        if (globalFailureSubsetCountParam > 0) {
+            // Determine if this node is in the chosen failing subset
+            bool inSubset = std::find(globalFailingNodes.begin(), globalFailingNodes.end(), nodeId) != globalFailingNodes.end();
+            if (!inSubset) {
+                timeToFailureParam = -1; // force disable
+            } else {
+                // Compose failure time: start offset + (optional exponential tail)
+                simtime_t startOffset = globalFailureStartTimeParam >= 0 ? simtime_t(globalFailureStartTimeParam) : SIMTIME_ZERO;
+                simtime_t tail = SIMTIME_ZERO;
+                if (globalFailureExpMeanParam > 0) {
+                    tail = exponential(globalFailureExpMeanParam);
+                }
+                timeToFailureParam = startOffset + tail; // deterministic or shifted exponential
+                failureJitterFracParam = 0; // jitter not applied with global logic
+            }
+        }
+
+        if (timeToFailureParam >= 0 && !failureEvent) {
+            scheduleFailure();
+        }
+        if (timeToFailureParam >= 0 && !failureEvent) {
+            EV_WARN << "[FailureDiag] WARNING: timeToFailureParam=" << timeToFailureParam << " but failureEvent not scheduled (unexpected)" << endl;
+            recordScalar("failureSchedulingAnomaly", 1);
+        }
+
+        if (dataPacketsDue || forwardPacketsDue || routingPacketsDue) {
+
+            // Only data packet due
+            if (dataPacketsDue && !forwardPacketsDue && !routingPacketsDue) {
+                scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
+                EV << "Self packet triggered by due data packet" << endl;
+            }
+            // Only forward packet due
+            else if (routingPacketsDue && !dataPacketsDue && !forwardPacketsDue) {
+                scheduleAt(simTime() + timeToFirstRoutingPacket, selfPacket);
+                EV << "Self packet triggered by due routing packet" << endl;
+            }
+            // Only routing packet due
+            else if (forwardPacketsDue && !dataPacketsDue && !routingPacketsDue) {
+                scheduleAt(simTime() + timeToFirstForwardPacket, selfPacket);
+                EV << "Self packet triggered by due forward packet" << endl;
+            }
+            // Data packet due earlier
+            else if (timeToFirstDataPacket < timeToFirstForwardPacket && timeToFirstDataPacket < timeToFirstRoutingPacket ) {
+                scheduleAt(simTime() + timeToFirstDataPacket, selfPacket);
+                EV << "Self packet triggered by due data packet before other due packets" << endl;
+            }
+
+================================================================================
+EXCERPT 2: finish() failure scalars
+src/LoRaApp/LoRaNodeApp.cc (lines 560-620)
+================================================================================
+
+    EV_INFO << " MY__Y__________" << y << endl;
+
+
+    EV_INFO << "selfPacket " <<endl;
+    std::pair<double, double> coordValues = std::make_pair(x, y);
+    return coordValues;
+}
+
+void LoRaNodeApp::finish() {
+    cModule *host = getContainingNode(this);
+    Coord coord;
+    if (auto mobMod = host->getSubmodule("mobility")) {
+        // Try dynamic cast to IMobility if available
+        if (auto mobIface = dynamic_cast<inet::IMobility *>(mobMod)) {
+            coord = mobIface->getCurrentPosition();
+        } else if (mobMod->hasPar("initialX") && mobMod->hasPar("initialY")) {
+            coord = Coord(mobMod->par("initialX").doubleValue(), mobMod->par("initialY").doubleValue(), 0);
+        }
+    }
+//    recordScalar("positionX", coord.x);
+//    recordScalar("positionY", coord.y);
+    // DistanceX.record(coord.x);
+    recordScalar("CordiX",coord.x);
+    // DistanceY.record(coord.y);
+    recordScalar("CordiY",coord.y);
+
+
+    recordScalar("finalTP", loRaTP);
+    recordScalar("finalSF", loRaSF);
+
+    // Failure related scalars
+    recordScalar("failed", failed ? 1 : 0);
+    if (failureTime >= SIMTIME_ZERO)
+        recordScalar("failureTime", failureTime);
+
+    // Export routing tables (CSV + TXT snapshot at end)
+    exportRoutingTables();
+
+    recordScalar("sentPackets", sentPackets);
+    recordScalar("sentDataPackets", sentDataPackets);
+    recordScalar("sentRoutingPackets", sentRoutingPackets);
+    recordScalar("sentAckPackets", sentAckPackets);
+    recordScalar("receivedPackets", receivedPackets);
+    recordScalar("receivedPacketsForMe", receivedPacketsForMe);
+    recordScalar("receivedPacketsFromMe", receivedPacketsFromMe);
+    recordScalar("receivedPacketsToForward", receivedPacketsToForward);
+    recordScalar("receivedDataPackets", receivedDataPackets);
+    recordScalar("receivedDataPacketsForMe", receivedDataPacketsForMe);
+    recordScalar("receivedDataPacketsForMeUnique", receivedDataPacketsForMeUnique);
+    recordScalar("receivedDataPacketsFromMe", receivedDataPacketsFromMe);
+    recordScalar("receivedDataPacketsToForward", receivedDataPacketsToForward);
+    recordScalar("receivedDataPacketsToForwardCorrect",
+            receivedDataPacketsToForwardCorrect);
+    recordScalar("receivedDataPacketsToForwardExpired",
+            receivedDataPacketsToForwardExpired);
+    recordScalar("receivedDataPacketsToForwardUnique",
+            receivedDataPacketsToForwardUnique);
+    recordScalar("receivedAckPacketsToForward", receivedAckPacketsToForward);
+    recordScalar("receivedAckPacketsToForwardCorrect",
+            receivedAckPacketsToForwardCorrect);
+    recordScalar("receivedAckPacketsToForwardExpired",
+
+================================================================================
+EXCERPT 3: drop/ignore behavior after failure
+src/LoRaApp/LoRaNodeApp.cc (lines 700-930)
+================================================================================
+
+    recordScalar("owndataTxPacketsSFStatsStdv", routingTxPacketsSFStats.getStddev());
+    recordScalar("fwdTxPacketsSFStatsMax", routingTxPacketsSFStats.getMax());
+    recordScalar("fwdTxPacketsSFStatsMean", routingTxPacketsSFStats.getMean());
+    recordScalar("fwdTxPacketsSFStatsMin", routingTxPacketsSFStats.getMin());
+    recordScalar("fwdTxPacketsSFStatsStdv", routingTxPacketsSFStats.getStddev());
+
+    dataPacketsForMeLatency.recordAs("dataPacketsForMeLatency");
+    dataPacketsForMeUniqueLatency.recordAs("dataPacketsForMeUniqueLatency");
+
+    // No persistent CSV stream; snapshots overwrite per write
+}
+
+void LoRaNodeApp::handleMessage(cMessage *msg) {
+    // If node already failed, drop everything except to process (already processed) failure event
+    if (failed) {
+        delete msg;
+        return;
+    }
+    if (msg->isSelfMessage()) {
+        handleSelfMessage(msg);
+    } else {
+        handleMessageFromLowerLayer(msg);
+    }
+}
+
+
+void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
+
+    // If this is the failure event, perform failure and stop any further actions
+    if (msg == failureEvent) {
+        performFailure();
+        return;
+    }
+
+    if (failed) {
+        return; // Ignore timers after failure
+    }
+
+    // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
+    // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
+    LoRaMac *lrmc = (LoRaMac *)getParentModule()->getSubmodule("LoRaNic")->getSubmodule("mac");
+    if (lrmc->fsm.getState() == IDLE ) {
+
+        simtime_t txDuration = 0;
+        simtime_t nextScheduleTime = 0;
+
+        bool sendData = false;
+        bool sendForward = false;
+        bool sendRouting = false;
+
+        // Check if there are data packets to send, and if it is time to send them
+        // TODO: Not using dataPacketsDue ???
+        if ( LoRaPacketsToSend.size() > 0 && simTime() >= nextDataPacketTransmissionTime ) {
+            sendData = true;
+        }
+
+        // Check if there are data packets to forward, and if it is time to send them
+        // TODO: Not using forwardPacketsDue ???
+        if ( LoRaPacketsToForward.size() > 0 && simTime() >= nextForwardPacketTransmissionTime ) {
+            sendForward = true;
+        }
+
+        // Check if there are routing packets to send
+        if ( routingPacketsDue && simTime() >= nextRoutingPacketTransmissionTime ) {
+            sendRouting = true;
+        }
+
+        // Now there could be between none and three types of packets due to be sent. Decide between routing and the
+        // other two types randomly with the probability from the routingPacketPriotity parameter
+        if (sendRouting && (sendData || sendForward) ) {
+            // Either send a routing packet...
+            if (bernoulli(routingPacketPriority)) {
+                sendData = false;
+                sendForward = false;
+            }
+            else {
+                sendRouting = false;
+            }
+        }
+
+        // Send routing packet
+        if (sendRouting) {
+            txDuration = sendRoutingPacket();
+            if (enforceDutyCycle) {
+                // Update duty cycle end
+                dutyCycleEnd = simTime() + txDuration/dutyCycle;
+                // Update next routing packet transmission time, taking the duty cycle into account
+                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl()/dutyCycle);
+            }
+            else {
+                // Update next routing packet transmission time
+                nextRoutingPacketTransmissionTime = simTime() + math::max(getTimeToNextRoutingPacket().dbl(), txDuration.dbl());
+            }
+        }
+
+        // Send data or forward packet
+        else if (sendData || sendForward) {
+
+            // If both data and forward packets are due, decide randomly between the two with the probability from the
+            // ownDataPriority parameter
+            if (sendData && sendForward) {
+                if (bernoulli(ownDataPriority))
+                    // Send own data packet
+                    sendForward = false;
+                else
+                    // Send forward packet
+                    sendData = false;
+            }
+
+            // Send data packet
+            if (sendData) {
+
+                txDuration = sendDataPacket();
+                if (enforceDutyCycle) {
+                    // Update duty cycle end
+                    dutyCycleEnd = simTime() + txDuration/dutyCycle;
+                    // Update next data packet transmission time, taking the duty cycle into account
+                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl()/dutyCycle);
+                }
+                else {
+                    // Update next data packet transmission time
+                    nextDataPacketTransmissionTime = simTime() + math::max(getTimeToNextDataPacket().dbl(), txDuration.dbl());
+                }
+            }
+            // or send forward packet
+            else {
+                txDuration = sendForwardPacket();
+                if (enforceDutyCycle) {
+                    // Update duty cycle end
+                    dutyCycleEnd = simTime() + txDuration/dutyCycle;
+                    // Update next forward packet transmission time, taking the duty cycle into account
+                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl()/dutyCycle);
+                }
+                else {
+                // Update next forward packet transmission time
+                    nextForwardPacketTransmissionTime = simTime() + math::max(getTimeToNextForwardPacket().dbl(), txDuration.dbl());
+                }
+            }
+        }
+
+        // We've sent a packet (routing, data or forward). Now reschedule a selfMessage if needed.
+        if ( LoRaPacketsToSend.size() > 0 )
+            dataPacketsDue = true;
+        if ( LoRaPacketsToForward.size() > 0 )
+            forwardPacketsDue = false;
+        // routingPackets due is handled below.
+
+        // Calculate next schedule time, first based on routing packets next transmission time,
+        if (routingPacketsDue) {
+            nextScheduleTime = nextRoutingPacketTransmissionTime.dbl();
+        }
+        // then based on data packets, if they are to be scheduled earlier,
+        if (dataPacketsDue) {
+            nextScheduleTime = std::min(nextScheduleTime.dbl(), nextDataPacketTransmissionTime.dbl());
+        }
+        // then based on forward packets, if they are to be scheduled earlier,
+        if (forwardPacketsDue) {
+            nextScheduleTime = std::min(nextScheduleTime.dbl(), nextForwardPacketTransmissionTime.dbl());
+        }
+        // but, in any case, not earlier than simTime()+txDuration.
+        nextScheduleTime = math::max(nextScheduleTime.dbl(), simTime().dbl()+txDuration.dbl());
+
+        // Take the duty cycle into account
+        if (enforceDutyCycle) {
+            nextScheduleTime = math::max(nextScheduleTime.dbl(), dutyCycleEnd.dbl());
+        }
+
+        // Last, although this should never happen, check the schedule time is in the future, otherwise just add a 1s delay
+        if (! (nextScheduleTime > simTime()) ) {
+            nextScheduleTime = simTime() + 1;
+        }
+
+        // Schedule a self message to send routing, data or forward packets. Since some calculations lose precision, add an extra delay
+        // (10x simtime-resolution unit) to avoid timing conflicts in the LoRaMac layer when simulations last very long.
+        if (routingPacketsDue || dataPacketsDue || forwardPacketsDue) {
+            scheduleAt(nextScheduleTime + 10*simTimeResolution, selfPacket);
+        }
+
+        if (!sendPacketsContinuously && routingPacketsDue) {
+
+            bool allNodesDone = true;
+
+            for (int i=0; i<numberOfNodes; i++) {
+                LoRaNodeApp *lrndpp = (LoRaNodeApp *) getParentModule()->getParentModule()->getSubmodule("loRaNodes", i)->getSubmodule("LoRaNodeApp");
+                if ( !(lrndpp->lastDataPacketTransmissionTime > 0 && \
+                     // ToDo: maybe too restrictive? If no packets were received at all
+                     // simulation laster until the very end
+                     //lrndpp->lastDataPacketReceptionTime > 0 &&
+                     lrndpp->lastDataPacketTransmissionTime + stopRoutingAfterDataDone < simTime() && \
+                     lrndpp->lastDataPacketReceptionTime + stopRoutingAfterDataDone < simTime() )) {
+                    allNodesDone = false;
+                    break;
+                }
+
+                if (allNodesDone) {
+                    routingPacketsDue = false;
+                }
+            }
+        }
+    }
+
+
+    // The LoRa radio was busy with a reception, so re-schedule the selfMessage a bit later
+    else {
+        // Instead of doing scheduling almost immediately: scheduleAt(simTime() + 10*simTimeResolution, selfPacket);
+        // wait 20 microseconds, which is approx. the transmission time for 1 bit (SF7, 125 kHz, 4:5)
+        scheduleAt(simTime() + 0.00002, selfPacket);
+    }
+}
+
+void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
+    if (failed) { delete msg; return; }
+    receivedPackets++;
+
+    LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
+
+    // Check if the packet is from this node (i.e., a packet that some
+    // other node is broadcasting which we have happened to receive). We
+    // count it and discard it immediately.
+    if (packet->getSource() == nodeId) {
+        receivedDataPacketsFromMe++;
+        bubble("I received a LoRa packet originally sent by me!");
+        if (firstDataPacketReceptionTime == 0) {
+            firstDataPacketReceptionTime = simTime();
+        }
+        lastDataPacketReceptionTime = simTime();
+    }
+    // Else, check if the packet is for this node (i.e., a packet directly
+    // received from the origin or relayed by a neighbour)
+    else if (packet->getDestination() == nodeId) {
+        bubble("I received a data packet for me!");
+
+================================================================================
+EXCERPT 4: sendDataPacket() early-return guard
+src/LoRaApp/LoRaNodeApp.cc (lines 1440-1475)
+================================================================================
+
+simtime_t LoRaNodeApp::sendDataPacket() {
+    if (failed) return 0; // Do not send after failure
+    LoRaAppPacket *dataPacket = new LoRaAppPacket("DataFrame");
+    std::cout << " i am sending the packet: "  << std::endl;
+    bool localData = true;
+    bool transmit = false;
+    simtime_t txDuration = 0;
+
+    // Send local data packets with a configurable ownDataPriority priority over packets to forward, if there is any
+    if (
+            (LoRaPacketsToSend.size() > 0 && bernoulli(ownDataPriority))
+            || (LoRaPacketsToSend.size() > 0 && LoRaPacketsToForward.size() == 0)) {
+
+        bubble("Sending a local data packet!");
+
+        // Name packets to ease tracking
+        std::string fullName = dataPacket->getName();;
+        const char* addName = "Orig";
+        fullName += addName;
+        fullName += std::to_string(nodeId);
+
+================================================================================
+EXCERPT 5: sendForwardPacket() early-return guard
+src/LoRaApp/LoRaNodeApp.cc (lines 1655-1690)
+================================================================================
+
+simtime_t LoRaNodeApp::sendForwardPacket() {
+    if (failed) return 0; // Do not send after failure
+    LoRaAppPacket *forwardPacket = new LoRaAppPacket("DataFrame");
+    std::cout << " im here forwarding the new packet: "  << std::endl;
+    bool transmit = false;
+    simtime_t txDuration = 0;
+
+    if (LoRaPacketsToForward.size() > 0) {
+
+        bubble("Forwarding a packet!");
+
+        std::string fullName = forwardPacket->getName();;
+        const char* addName = "Fwd";
+        fullName += addName;
+        forwardPacket->setName(fullName.c_str());
+        fullName += std::to_string(nodeId);
+
+        switch (routingMetric) {
+            case NO_FORWARDING:
+                // This should never happen
+                bubble("Forwarding disabled!");
+                break;
+
+            case FLOODING_BROADCAST_SINGLE_SF:
+
+================================================================================
+EXCERPT 6: sendRoutingPacket() early-return guard
+src/LoRaApp/LoRaNodeApp.cc (lines 1800-1830)
+================================================================================
+
+simtime_t LoRaNodeApp::sendRoutingPacket() {
+    if (failed) return 0; // Do not send after failure
+
+    bool transmit = false;
+    simtime_t txDuration = 0;
+    int numberOfRoutes = 0;
+
+    LoRaAppPacket *routingPacket = new LoRaAppPacket("RoutingPacket");
+
+    LoRaMacControlInfo *cInfo = new LoRaMacControlInfo;
+
+    cInfo->setLoRaTP(loRaTP);
+    cInfo->setLoRaCF(loRaCF);
+    cInfo->setLoRaSF(loRaSF);
+    cInfo->setLoRaBW(loRaBW);
+    cInfo->setLoRaCR(loRaCR);
+
+    sanitizeRoutingTable();
+
+================================================================================
+EXCERPT 7: generateDataPackets() early-return guard
+src/LoRaApp/LoRaNodeApp.cc (lines 1925-1955)
+================================================================================
+
+void LoRaNodeApp::generateDataPackets() {
+    if (failed) return; // Do not generate after failure
+
+    if (!onlyNode0SendsPackets || nodeId == 0) {
+        std::vector<int> destinations = { };
+
+        if (numberOfDestinationsPerNode == 0 )
+            numberOfDestinationsPerNode = numberOfNodes-1;
+
+        while (destinations.size() < numberOfDestinationsPerNode
+                && numberOfNodes - 1 - destinations.size() > 0) {
+
+            int destination = intuniform(0, numberOfNodes - 1);
+
+            if (destination != nodeId) {
+                bool newDestination = true;
+
+================================================================================
+EXCERPT 8: failure helpers + global failure subset selection definitions
+src/LoRaApp/LoRaNodeApp.cc (lines 2285-2465)
+================================================================================
+
+
+    int nPreamble = 8;
+    simtime_t Tsym = (pow(2, cInfo->getLoRaSF()))/(cInfo->getLoRaBW().get()/1000);
+    simtime_t Tpreamble = (nPreamble + 4.25) * Tsym / 1000;
+
+    int payloadBytes = frame->getByteLength()+8; //+8 bytes for headers
+
+    int payloadSymbNb = 8 + math::max(ceil((8*payloadBytes - 4*cInfo->getLoRaSF() + 28 + 16 - 20*0)/(4*(cInfo->getLoRaSF()-2*0)))*(cInfo->getLoRaCR() + 4), 0);
+
+    simtime_t Theader = 0.5 * (8+payloadSymbNb) * Tsym / 1000;
+    simtime_t Tpayload = 0.5 * (8+payloadSymbNb) * Tsym / 1000;
+
+    const simtime_t duration = Tpreamble + Theader + Tpayload;
+    return duration;
+}
+
+// ---------------- Failure handling & export helpers ----------------
+
+void LoRaNodeApp::scheduleFailure() {
+    // Apply jitter if configured
+    double base = timeToFailureParam.dbl();
+    if (base < 0) return;
+    double jitterFrac = std::max(0.0, failureJitterFracParam);
+    double jitterPortion = 0.0;
+    if (jitterFrac > 0) {
+        jitterPortion = uniform(-jitterFrac, jitterFrac) * base;
+    }
+    double scheduleDelay = std::max(0.0, base + jitterPortion);
+    failureEvent = new cMessage("failureEvent");
+    scheduleAt(simTime() + scheduleDelay, failureEvent);
+}
+
+void LoRaNodeApp::performFailure() {
+    if (failed) return; // idempotent
+    failed = true;
+    failureTime = simTime();
+    // Cancel any future transmissions
+    if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
+    // Release failureEvent (processed)
+    if (failureEvent) {
+        delete failureEvent;
+        failureEvent = nullptr;
+    }
+    bubble("Node FAILED (simulated random failure)");
+    // Record immediate scalars if not already
+    recordScalar("failed", 1);
+    recordScalar("failureTime", failureTime);
+    // Visual indication in GUI (if running Qtenv)
+    cModule *parentNode = getParentModule();
+    if (parentNode) {
+        try {
+            cDisplayString &ds = parentNode->getDisplayString();
+            // Add semi-transparent red background halo and tooltip
+            ds.setTagArg("b", 0, "30");
+            ds.setTagArg("b", 1, "#FF000080");
+            ds.setTagArg("tt", 0, (std::string("FAILED at ")+failureTime.str()).c_str());
+            // Attempt to tint icon
+            ds.setTagArg("i", 1, "#ff0000");
+        } catch(...) {}
+    }
+}
+
+void LoRaNodeApp::exportRoutingTables() {
+    // Ensure directory exists (reuse logic similar to openRoutingCsv)
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string folder = std::string("routing_tables");
+#ifdef _WIN32
+    _mkdir(folder.c_str());
+#else
+    mkdir(folder.c_str(), 0775);
+#endif
+
+    // CSV (single metric)
+    {
+        std::stringstream fcsv;
+        fcsv << folder << sep << "node" << nodeId << "_single.csv";
+        std::ofstream ofs(fcsv.str(), std::ios::out | std::ios::trunc);
+        if (ofs.is_open()) {
+            ofs << "id,via,metric,validUntil" << std::endl;
+            for (auto &r : singleMetricRoutingTable) {
+                ofs << r.id << ',' << r.via << ',' << r.metric << ',' << r.valid << std::endl;
+            }
+        }
+    }
+    // CSV (dual metric)
+    {
+        std::stringstream fcsv2;
+        fcsv2 << folder << sep << "node" << nodeId << "_dual.csv";
+        std::ofstream ofs2(fcsv2.str(), std::ios::out | std::ios::trunc);
+        if (ofs2.is_open()) {
+            ofs2 << "id,via,sf,priMetric,secMetric,validUntil" << std::endl;
+            for (auto &r : dualMetricRoutingTable) {
+                ofs2 << r.id << ',' << r.via << ',' << r.sf << ',' << r.priMetric << ',' << r.secMetric << ',' << r.valid << std::endl;
+            }
+        }
+    }
+    // TXT human readable
+    {
+        std::stringstream ftxt;
+        ftxt << folder << sep << "node" << nodeId << "_routing_table.txt";
+        std::ofstream txt(ftxt.str(), std::ios::out | std::ios::trunc);
+        if (txt.is_open()) {
+            txt << "Node " << nodeId << " Routing Table (simTime=" << simTime() << ")\n";
+            txt << "Single-metric entries: " << singleMetricRoutingTable.size() << "\n";
+            for (auto &r : singleMetricRoutingTable) {
+                txt << " dest=" << r.id << " via=" << r.via << " metric=" << r.metric << " validUntil=" << r.valid << "\n";
+            }
+            txt << "Dual-metric entries: " << dualMetricRoutingTable.size() << "\n";
+            for (auto &r : dualMetricRoutingTable) {
+                txt << " dest=" << r.id << " via=" << r.via << " sf=" << r.sf << " pri=" << r.priMetric << " sec=" << r.secMetric << " validUntil=" << r.valid << "\n";
+            }
+            if (failed) {
+                txt << "Node failed at: " << failureTime << "\n";
+            }
+        }
+    }
+}
+
+// -------- Global failure selection static members --------
+bool LoRaNodeApp::globalFailureInitialized = false;
+std::vector<int> LoRaNodeApp::globalFailingNodes = {};
+int LoRaNodeApp::globalFailureSubsetCountParam = -1;
+double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
+double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
+int LoRaNodeApp::globalTotalNodesObserved = 0;
+
+void LoRaNodeApp::initGlobalFailureSelection() {
+    // Read parameters (each instance sees same values); perform selection once
+    int subsetCount = par("globalFailureSubsetCount");
+    simtime_t startTime = par("globalFailureStartTime");
+    simtime_t expMean = par("globalFailureExpMean");
+    if (subsetCount <= 0) {
+        // Nothing to do
+        globalFailureSubsetCountParam = -1;
+        return;
+    }
+    // Track max nodes observed (for late module creation scenarios)
+    if (nodeId + 1 > globalTotalNodesObserved)
+        globalTotalNodesObserved = nodeId + 1;
+    if (!globalFailureInitialized) {
+        globalFailureSubsetCountParam = subsetCount;
+    globalFailureStartTimeParam = (startTime >= SIMTIME_ZERO) ? startTime.dbl() : 0.0;
+    globalFailureExpMeanParam = expMean.dbl();
+        // Build list of all node indices we have now; assume numberOfNodes covers relay nodes
+        int total = par("numberOfNodes");
+        if (total <= 0) total = globalTotalNodesObserved; // fallback
+        std::vector<int> all;
+        all.reserve(total);
+        for (int i = 0; i < total; ++i) all.push_back(i);
+        // Shuffle and take first subsetCount (cMersenneTwister via intrand?)
+        for (int i = 0; i < (int)all.size(); ++i) {
+            int j = intuniform(i, (int)all.size()-1);
+            std::swap(all[i], all[j]);
+        }
+        if (subsetCount > total) subsetCount = total;
+        globalFailingNodes.assign(all.begin(), all.begin()+subsetCount);
+        globalFailureInitialized = true;
+        EV_INFO << "[GlobalFailure] Selected " << subsetCount << " failing nodes out of " << total 
+                << ". StartOffset=" << globalFailureStartTimeParam << "s"
+                << " expMean=" << globalFailureExpMeanParam << "s Nodes=";
+        for (size_t k=0;k<globalFailingNodes.size();++k) EV_INFO << globalFailingNodes[k] << (k+1<globalFailingNodes.size()?",":"");
+        EV_INFO << endl;
+    }
+}

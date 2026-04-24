@@ -20,6 +20,7 @@
 #include <string>
 #include <set>
 #include <map>
+#include <vector>
 #include <cstdint>
 
 #include "inet/common/lifecycle/ILifecycle.h"
@@ -113,6 +114,19 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
             scheduleAt(t, selfPacket);
         }
     }
+
+        // Node failure support
+        void scheduleFailure();
+        void performFailure();
+        void initGlobalFailureSelection();
+        bool isRelayNodeModule() const;
+        bool isSelectedForGlobalFailure() const;
+        const char* getNodeRole() const;
+        bool isFailureLogMaster() const;
+        void ensureDeliveredPacketsDir() const;
+        void clearFailureLogForRun() const;
+        void appendNodeFailure(simtime_t when) const;
+        void finalizeFailureLogIfNone() const;
         std::pair<double,double> generateUniformCircleCoordinates(double radius, double gatewayX, double gatewayY);
         void sendJoinRequest();
         void sendDownMgmtPacket();
@@ -230,6 +244,22 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     
     // Blacklisted nodes (unidirectional link detection)
     std::map<int, simtime_t> aodvBlacklistedNodes;  // nodeId -> blacklist expiry time
+
+        // Failure parameters/state
+        bool nodeFailed = false;
+        cMessage *failureTimer = nullptr;
+        simtime_t timeToFailure;
+        double failureJitterFrac;
+        int globalFailureSubsetCount;
+        simtime_t globalFailureStartTime;
+        simtime_t globalFailureEndTime;
+        simtime_t globalFailureExpMean;
+
+        // Shared across all instances (for coordinated subset + log coordination)
+        static bool globalFailureSelectionDone;
+        static std::set<int> globalFailureSelectedRelayIndices;
+        static bool failureLogClearedForRun;
+        static bool anyNodeFailuresLogged;
 
         cHistogram allTxPacketsSFStats;
         cHistogram routingTxPacketsSFStats;

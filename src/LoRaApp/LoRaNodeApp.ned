@@ -85,6 +85,22 @@ simple LoRaNodeApp
         int dataPacketDefaultSize @unit(B) = default(50B);
         int routingPacketMaxSize @unit(B) = default(16B);
         volatile double stopRoutingAfterDataDone @unit(s) = default(3600s);
+
+        // ==============================================================
+        // Node failure support
+        // - Per-node mode: set timeToFailure >= 0s (optionally jittered)
+        // - Coordinated subset mode (relays): set globalFailureSubsetCount > 0
+        //   and configure globalFailureStartTime (+ optional end window)
+        // ==============================================================
+        volatile double timeToFailure @unit(s) = default(-1s);
+        double failureJitterFrac = default(0);
+
+        // Coordinated subset failures for relay nodes (e.g., **.loRaNodes[*])
+        int globalFailureSubsetCount = default(0);
+        volatile double globalFailureStartTime @unit(s) = default(-1s);
+        volatile double globalFailureEndTime @unit(s) = default(-1s);
+        volatile double globalFailureExpMean @unit(s) = default(0s);
+
         int forwardedPacketVectorSize = default(10);
         int packetsToForwardMaxVectorSize = default(0);
     // When true, do not send proactive routing beacons; routes are discovered via AODV only

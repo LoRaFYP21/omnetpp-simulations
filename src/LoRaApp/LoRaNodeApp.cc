@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <set>
 #ifdef _WIN32
 #include <direct.h>
@@ -80,6 +81,195 @@ static inline bool isRescueNodeHost(cSimpleModule* self) {
 
 Define_Module (LoRaNodeApp);
 
+bool LoRaNodeApp::globalFailureSelectionDone = false;
+std::set<int> LoRaNodeApp::globalFailureSelectedRelayIndices;
+bool LoRaNodeApp::failureLogClearedForRun = false;
+bool LoRaNodeApp::anyNodeFailuresLogged = false;
+
+bool LoRaNodeApp::isRelayNodeModule() const {
+    cModule *hostMod = getContainingNode(const_cast<LoRaNodeApp*>(this));
+    if (!hostMod) return false;
+    const char *n = hostMod->getName();
+    return n && strncmp(n, "loRaNodes", 8) == 0;
+}
+
+bool LoRaNodeApp::isFailureLogMaster() const {
+    if (!isRelayNodeModule()) return false;
+    cModule *hostMod = getContainingNode(const_cast<LoRaNodeApp*>(this));
+    return hostMod && hostMod->getIndex() == 0;
+}
+
+const char* LoRaNodeApp::getNodeRole() const {
+    if (isRescueNodeHost(const_cast<LoRaNodeApp*>(this))) return "rescue";
+    if (isEndNodeHost(const_cast<LoRaNodeApp*>(this))) return "end";
+    return "relay";
+}
+
+void LoRaNodeApp::ensureDeliveredPacketsDir() const {
+#ifdef _WIN32
+    _mkdir("simulations");
+    _mkdir("simulations/delivered_packets");
+#else
+    mkdir("simulations", 0777);
+    mkdir("simulations/delivered_packets", 0777);
+#endif
+}
+
+void LoRaNodeApp::clearFailureLogForRun() const {
+    if (failureLogClearedForRun) return;
+    ensureDeliveredPacketsDir();
+    std::ofstream out("simulations/delivered_packets/node_failures.txt", std::ios::trunc);
+    if (!out.is_open()) return;
+    out << "simTime,nodeId,role" << std::endl;
+    out.close();
+    failureLogClearedForRun = true;
+    anyNodeFailuresLogged = false;
+}
+
+void LoRaNodeApp::appendNodeFailure(simtime_t when) const {
+    if (!failureLogClearedForRun) {
+        clearFailureLogForRun();
+    }
+    std::ofstream out("simulations/delivered_packets/node_failures.txt", std::ios::app);
+    if (!out.is_open()) return;
+    out << std::setprecision(13) << when.dbl() << "," << nodeId << "," << getNodeRole() << std::endl;
+    out.close();
+    anyNodeFailuresLogged = true;
+}
+
+void LoRaNodeApp::finalizeFailureLogIfNone() const {
+    if (!failureLogClearedForRun) {
+        clearFailureLogForRun();
+    }
+    if (!anyNodeFailuresLogged) {
+        std::ofstream out("simulations/delivered_packets/node_failures.txt", std::ios::app);
+        if (!out.is_open()) return;
+        out << "no node failures" << std::endl;
+        out.close();
+    }
+}
+
+void LoRaNodeApp::initGlobalFailureSelection() {
+    if (globalFailureSelectionDone) return;
+
+    // Only relay nodes participate in coordinated subset failure selection.
+    if (!isRelayNodeModule()) {
+        return;
+    }
+
+    int candidateCount = par("numberOfNodes");
+    int subsetCount = globalFailureSubsetCount;
+    if (candidateCount <= 0 || subsetCount <= 0) {
+        globalFailureSelectionDone = true;
+        return;
+    }
+    if (subsetCount > candidateCount) subsetCount = candidateCount;
+
+    std::vector<int> indices;
+    indices.reserve(candidateCount);
+    for (int i = 0; i < candidateCount; ++i) indices.push_back(i);
+
+    // Fisher-Yates shuffle using OMNeT++ RNG
+    for (int i = candidateCount - 1; i > 0; --i) {
+        int j = intrand(i + 1);
+        std::swap(indices[i], indices[j]);
+    }
+
+    globalFailureSelectedRelayIndices.clear();
+    for (int i = 0; i < subsetCount; ++i) {
+        globalFailureSelectedRelayIndices.insert(indices[i]);
+    }
+    globalFailureSelectionDone = true;
+}
+
+bool LoRaNodeApp::isSelectedForGlobalFailure() const {
+    if (!isRelayNodeModule()) return false;
+    cModule *hostMod = getContainingNode(const_cast<LoRaNodeApp*>(this));
+    if (!hostMod) return false;
+    return globalFailureSelectedRelayIndices.count(hostMod->getIndex()) != 0;
+}
+
+void LoRaNodeApp::scheduleFailure() {
+    if (nodeFailed) return;
+    if (!failureTimer) {
+        failureTimer = new cMessage("failureTimer");
+    }
+    if (failureTimer->isScheduled()) cancelEvent(failureTimer);
+
+    simtime_t scheduledTime = -1;
+
+    // Coordinated subset mode (typically enabled only on **.loRaNodes[*])
+    if (globalFailureSubsetCount > 0) {
+        if (globalFailureStartTime < SIMTIME_ZERO) return;
+        initGlobalFailureSelection();
+        if (!isSelectedForGlobalFailure()) return;
+
+        if (globalFailureEndTime > globalFailureStartTime) {
+            scheduledTime = uniform(globalFailureStartTime, globalFailureEndTime);
+        } else if (globalFailureExpMean > SIMTIME_ZERO) {
+            scheduledTime = globalFailureStartTime + exponential(globalFailureExpMean);
+        } else {
+            scheduledTime = globalFailureStartTime;
+        }
+    }
+    // Per-node mode
+    else if (timeToFailure >= SIMTIME_ZERO) {
+        if (failureJitterFrac > 0) {
+            double lo = std::max(0.0, 1.0 - failureJitterFrac);
+            double hi = 1.0 + failureJitterFrac;
+            scheduledTime = timeToFailure * uniform(lo, hi);
+        } else {
+            scheduledTime = timeToFailure;
+        }
+    }
+
+    if (scheduledTime >= SIMTIME_ZERO) {
+        scheduleAt(scheduledTime, failureTimer);
+    }
+}
+
+void LoRaNodeApp::performFailure() {
+    if (nodeFailed) return;
+    nodeFailed = true;
+
+    // Cancel own periodic/self scheduling
+    if (selfPacket && selfPacket->isScheduled()) cancelEvent(selfPacket);
+    if (configureLoRaParameters && configureLoRaParameters->isScheduled()) cancelEvent(configureLoRaParameters);
+
+    routingPacketsDue = false;
+    dataPacketsDue = false;
+    forwardPacketsDue = false;
+    aodvPacketsDue = false;
+
+    // Stop any queued transmissions/forwards
+    LoRaPacketsToSend.clear();
+    LoRaPacketsToForward.clear();
+
+    // Cancel AODV retry timers
+    for (auto &kv : aodvRetryTimers) {
+        if (kv.second) {
+            if (kv.second->isScheduled()) cancelEvent(kv.second);
+            delete kv.second;
+        }
+    }
+    aodvRetryTimers.clear();
+    aodvRetryCount.clear();
+    aodvDiscoveryInProgress.clear();
+
+    // Cancel RREP-ACK pending timers
+    for (auto &kv : aodvPendingRrepAcks) {
+        if (kv.second.timer) {
+            if (kv.second.timer->isScheduled()) cancelEvent(kv.second.timer);
+            delete kv.second.timer;
+            kv.second.timer = nullptr;
+        }
+    }
+    aodvPendingRrepAcks.clear();
+
+    appendNodeFailure(simTime());
+    bubble("NODE FAILED");
+}
+
 void LoRaNodeApp::initialize(int stage) {
 
     cSimpleModule::initialize(stage);
@@ -100,6 +290,18 @@ void LoRaNodeApp::initialize(int stage) {
     }
 
     if (stage == INITSTAGE_LOCAL) {
+        // Reset shared/static state once per simulation run.
+        // OMNeT++ can execute multiple runs per process; without this,
+        // the selected relay subset and the failure log state could leak across runs.
+        static cSimulation *lastSim = nullptr;
+        if (getSimulation() != lastSim) {
+            globalFailureSelectionDone = false;
+            globalFailureSelectedRelayIndices.clear();
+            failureLogClearedForRun = false;
+            anyNodeFailuresLogged = false;
+            lastSim = getSimulation();
+        }
+
         // Get this node's ID
         nodeId = getContainingNode(this)->getIndex();
         originalNodeIndex = nodeId;  // Store original index before offset
@@ -655,6 +857,20 @@ void LoRaNodeApp::initialize(int stage) {
         }
 
         dutyCycleEnd = simTime();
+
+        // --- Node failure initialization ---
+        nodeFailed = false;
+        timeToFailure = par("timeToFailure");
+        failureJitterFrac = par("failureJitterFrac");
+        globalFailureSubsetCount = par("globalFailureSubsetCount");
+        globalFailureStartTime = par("globalFailureStartTime");
+        globalFailureEndTime = par("globalFailureEndTime");
+        globalFailureExpMean = par("globalFailureExpMean");
+
+        if (isFailureLogMaster()) {
+            clearFailureLogForRun();
+        }
+        scheduleFailure();
     }
 }
 
@@ -833,6 +1049,10 @@ void LoRaNodeApp::finish() {
     recordScalar("fwdTxPacketsSFStatsMin", routingTxPacketsSFStats.getMin());
     recordScalar("fwdTxPacketsSFStatsStdv", routingTxPacketsSFStats.getStddev());
 
+    if (isFailureLogMaster()) {
+        finalizeFailureLogIfNone();
+    }
+
     dataPacketsForMeLatency.recordAs("dataPacketsForMeLatency");
     dataPacketsForMeUniqueLatency.recordAs("dataPacketsForMeUniqueLatency");
 }
@@ -840,6 +1060,19 @@ void LoRaNodeApp::finish() {
 void LoRaNodeApp::handleMessage(cMessage *msg) {
 
     if (msg->isSelfMessage()) {
+        if (msg == failureTimer) {
+            performFailure();
+            return;
+        }
+
+        if (nodeFailed) {
+            // Ignore other timers after failure. Only delete dynamically allocated timer messages.
+            if (msg != selfPacket && msg != configureLoRaParameters) {
+                delete msg;
+            }
+            return;
+        }
+
         // Dedicated AODV retry timers use a name prefix
         const char* n = msg->getName();
         if (n && strncmp(n, "AODV_RETRY_", 11) == 0) {
@@ -859,6 +1092,10 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
 
 
 void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
+
+    if (nodeFailed) {
+        return;
+    }
 
     // Received a selfMessage for transmitting a scheduled packet.  Only proceed to send a packet
     // if the 'mac' module in 'LoRaNic' is IDLE and the warmup period is due (TODO: implement check for the latter).
@@ -1056,6 +1293,10 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
 }
 
 void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
+    if (nodeFailed) {
+        delete msg;
+        return;
+    }
     receivedPackets++;
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
