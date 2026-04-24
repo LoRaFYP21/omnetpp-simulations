@@ -984,13 +984,19 @@ void LoRaNodeApp::initialize(int stage) {
             if (!inSubset) {
                 timeToFailureParam = -1; // force disable
             } else {
-                // Compose failure time: start offset + (optional exponential tail)
+                // Compose failure delay:
+                // - If globalFailureEndTime is set (> start), sample uniformly within [start,end]
+                // - Else, use start + exponential(mean) (legacy behavior)
+                // - Else, use just start
                 simtime_t startOffset = globalFailureStartTimeParam >= 0 ? simtime_t(globalFailureStartTimeParam) : SIMTIME_ZERO;
-                simtime_t tail = SIMTIME_ZERO;
-                if (globalFailureExpMeanParam > 0) {
-                    tail = exponential(globalFailureExpMeanParam);
+                if (globalFailureEndTimeParam > 0 && globalFailureEndTimeParam > startOffset.dbl()) {
+                    simtime_t endOffset = simtime_t(globalFailureEndTimeParam);
+                    timeToFailureParam = uniform(startOffset, endOffset);
+                } else if (globalFailureExpMeanParam > 0) {
+                    timeToFailureParam = startOffset + exponential(globalFailureExpMeanParam);
+                } else {
+                    timeToFailureParam = startOffset;
                 }
-                timeToFailureParam = startOffset + tail; // deterministic or shifted exponential
                 failureJitterFracParam = 0; // jitter not applied with global logic
             }
         }
@@ -4509,6 +4515,7 @@ std::vector<int> LoRaNodeApp::globalFailingNodes = {};
 int LoRaNodeApp::globalFailureSubsetCountParam = -1;
 double LoRaNodeApp::globalFailureStartTimeParam = -1; // seconds
 double LoRaNodeApp::globalFailureExpMeanParam = 0;    // seconds mean
+double LoRaNodeApp::globalFailureEndTimeParam = -1;   // seconds end of window; <0 disables window
 int LoRaNodeApp::globalTotalNodesObserved = 0;
 
 // -------- Global routing convergence static members --------
@@ -4523,6 +4530,7 @@ void LoRaNodeApp::initGlobalFailureSelection() {
     int subsetCount = par("globalFailureSubsetCount");
     simtime_t startTime = par("globalFailureStartTime");
     simtime_t expMean = par("globalFailureExpMean");
+    simtime_t endTime = par("globalFailureEndTime");
     if (subsetCount <= 0) {
         // Nothing to do
         globalFailureSubsetCountParam = -1;
@@ -4533,8 +4541,14 @@ void LoRaNodeApp::initGlobalFailureSelection() {
         globalTotalNodesObserved = nodeId + 1;
     if (!globalFailureInitialized) {
         globalFailureSubsetCountParam = subsetCount;
-    globalFailureStartTimeParam = (startTime >= SIMTIME_ZERO) ? startTime.dbl() : 0.0;
-    globalFailureExpMeanParam = expMean.dbl();
+        globalFailureStartTimeParam = (startTime >= SIMTIME_ZERO) ? startTime.dbl() : 0.0;
+        globalFailureExpMeanParam = expMean.dbl();
+        // Window end time: only meaningful if strictly greater than start
+        if (endTime > startTime) {
+            globalFailureEndTimeParam = endTime.dbl();
+        } else {
+            globalFailureEndTimeParam = -1;
+        }
         // Build list of all node indices we have now; assume numberOfNodes covers relay nodes
         int total = par("numberOfNodes");
         if (total <= 0) total = globalTotalNodesObserved; // fallback
@@ -4551,7 +4565,8 @@ void LoRaNodeApp::initGlobalFailureSelection() {
         globalFailureInitialized = true;
         EV_INFO << "[GlobalFailure] Selected " << subsetCount << " failing nodes out of " << total 
                 << ". StartOffset=" << globalFailureStartTimeParam << "s"
-                << " expMean=" << globalFailureExpMeanParam << "s Nodes=";
+            << " endTime=" << globalFailureEndTimeParam << "s"
+            << " expMean=" << globalFailureExpMeanParam << "s Nodes=";
         for (size_t k=0;k<globalFailingNodes.size();++k) EV_INFO << globalFailingNodes[k] << (k+1<globalFailingNodes.size()?",":"");
         EV_INFO << endl;
     }

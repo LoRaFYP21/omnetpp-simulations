@@ -122,6 +122,7 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     static int globalFailureSubsetCountParam;    // cached param
     static double globalFailureStartTimeParam; // cached (seconds)
     static double globalFailureExpMeanParam;   // cached mean (seconds)
+    static double globalFailureEndTimeParam;   // cached end of allowed window (seconds); <0 means disabled
     static int globalTotalNodesObserved;          // track highest node index+1 seen
     void initGlobalFailureSelection();            // choose subset if needed
 
