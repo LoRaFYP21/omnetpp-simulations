@@ -407,18 +407,53 @@ void LoRaNodeApp::initialize(int stage) {
             double sepX = host->par("sepX");
             double minY = host->par("minY");
             double sepY = host->par("sepY");
+            // Backwards compatible defaults: if no override is provided, keep legacy sqrt(N) columns.
             int cols = int(sqrt(numberOfNodes));
+            if (host->hasPar("gridCols")) {
+                int overrideCols = host->par("gridCols").intValue();
+                if (overrideCols > 0)
+                    cols = overrideCols;
+            }
+
+            double jitter = 100.0;
+            if (host->hasPar("gridJitter")) {
+                jitter = host->par("gridJitter").doubleValue();
+                if (jitter < 0)
+                    jitter = -jitter;
+            }
+
+            // Only apply the historical "node 0 at middle" special-case to end nodes.
+            bool iAmEnd = host->hasPar("iAmEnd") && host->par("iAmEnd").boolValue();
 
             cModule *mobMod2 = host->getSubmodule("mobility");
             if (mobMod2) {
+                auto clamp = [](double value, double lo, double hi) {
+                    if (lo > hi)
+                        std::swap(lo, hi);
+                    return std::min(hi, std::max(lo, value));
+                };
+
+                // Respect INET mobility constraint area if present.
+                // Without clamping, ±jitter can push edge nodes outside bounds (e.g. x < 0 or x > 10000).
+                double minConstraintX = -1e100;
+                double maxConstraintX =  1e100;
+                double minConstraintY = -1e100;
+                double maxConstraintY =  1e100;
+                if (mobMod2->hasPar("constraintAreaMinX")) minConstraintX = mobMod2->par("constraintAreaMinX").doubleValue();
+                if (mobMod2->hasPar("constraintAreaMaxX")) maxConstraintX = mobMod2->par("constraintAreaMaxX").doubleValue();
+                if (mobMod2->hasPar("constraintAreaMinY")) minConstraintY = mobMod2->par("constraintAreaMinY").doubleValue();
+                if (mobMod2->hasPar("constraintAreaMaxY")) maxConstraintY = mobMod2->par("constraintAreaMaxY").doubleValue();
                 double newX, newY;
-                if (nodeId == 0 && routingMetric == 0){ // end node 0 at middle
-                    newX = minX + sepX * (cols/2);
-                    newY = minY + sepY * (cols/2) + uniform(0,100);
+                if (iAmEnd && nodeId == 0 && routingMetric == 0) { // end node 0 at middle
+                    newX = minX + sepX * (cols / 2);
+                    newY = minY + sepY * (cols / 2) + uniform(-jitter, jitter);
                 } else {
-                    newX = minX + sepX * (nodeId % cols) + uniform(0,100);
-                    newY = minY + sepY * ((int) nodeId / cols) + uniform(0,100);
+                    newX = minX + sepX * (nodeId % cols) + uniform(-jitter, jitter);
+                    newY = minY + sepY * ((int) nodeId / cols) + uniform(-jitter, jitter);
                 }
+
+                newX = clamp(newX, minConstraintX, maxConstraintX);
+                newY = clamp(newY, minConstraintY, maxConstraintY);
                 if (mobMod2->hasPar("initialX")) mobMod2->par("initialX").setDoubleValue(newX);
                 if (mobMod2->hasPar("initialY")) mobMod2->par("initialY").setDoubleValue(newY);
             }
