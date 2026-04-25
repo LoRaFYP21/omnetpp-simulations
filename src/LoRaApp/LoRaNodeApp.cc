@@ -1090,6 +1090,12 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
             return;
         }
         // RREP-ACK timeout timers
+        // (timer name created by scheduleRrepAckTimer)
+        if (n && strcmp(n, "RREP-ACK-TIMEOUT") == 0) {
+            handleRrepAckTimer(msg);
+            return;
+        }
+        // Backward/alternate naming (keep in case older runs/scripts used it)
         if (n && strncmp(n, "AODV_RREPACK_TIMEOUT_", 21) == 0) {
             handleRrepAckTimer(msg);
             return;

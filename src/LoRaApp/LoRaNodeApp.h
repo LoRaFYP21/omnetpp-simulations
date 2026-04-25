@@ -279,8 +279,8 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
 
         simtime_t simTimeResolution;
 
-        cMessage *configureLoRaParameters;
-        cMessage *selfPacket;
+        cMessage *configureLoRaParameters = nullptr;
+        cMessage *selfPacket = nullptr;
 
         //history of sent packets;
         cOutVector txSfVector;
