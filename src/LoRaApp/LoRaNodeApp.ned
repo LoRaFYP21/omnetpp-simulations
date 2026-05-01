@@ -115,6 +115,13 @@ simple LoRaNodeApp
     int aodvMaxRrepRetries = default(2);
     volatile double aodvRrepAckTimeout @unit(s) = default(0.1s);
     volatile double aodvBlacklistTimeout @unit(s) = default(10s);
+
+    // Hop-by-hop DATA-ACK and basic link-break detection
+    bool aodvEnableDataAck = default(false);
+    volatile double aodvDataAckTimeout @unit(s) = default(3s);
+    volatile double aodvDataAckForwardDelay @unit(s) = default(1ms);
+    int aodvDataAckMaxRetries = default(2); // number of retransmissions
+    int aodvRerrTtl = default(20);
     gates:
         output appOut @labels(LoRaAppPacket/down);
         input appIn @labels(LoRaAppPacket/up);

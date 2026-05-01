@@ -276,6 +276,17 @@ void LoRaNodeApp::performFailure() {
     }
     aodvPendingRrepAcks.clear();
 
+    // Cancel DATA-ACK pending timers
+    for (auto &kv : aodvPendingDataAcks) {
+        if (kv.second.timer) {
+            if (kv.second.timer->isScheduled()) cancelEvent(kv.second.timer);
+            delete kv.second.timer;
+            kv.second.timer = nullptr;
+        }
+    }
+    aodvPendingDataAcks.clear();
+    aodvDataRetransmitQueue.clear();
+
     appendNodeFailure(simTime());
     bubble("NODE FAILED");
 }
@@ -576,6 +587,13 @@ void LoRaNodeApp::initialize(int stage) {
 
         //Routing variables
         routingMetric = par("routingMetric");
+
+        // DATA-ACK / RERR parameters
+        aodvEnableDataAck = par("aodvEnableDataAck").boolValue();
+        aodvDataAckTimeout = par("aodvDataAckTimeout").doubleValue();
+        aodvDataAckForwardDelay = par("aodvDataAckForwardDelay").doubleValue();
+        aodvDataAckMaxRetries = par("aodvDataAckMaxRetries").intValue();
+        aodvRerrTtl = par("aodvRerrTtl").intValue();
         routeDiscovery = par("routeDiscovery");
         // Route discovery must be enabled for broadcast-based smart forwarding
         switch (routingMetric) {
@@ -1135,6 +1153,12 @@ void LoRaNodeApp::handleMessage(cMessage *msg) {
             handleRrepAckTimer(msg);
             return;
         }
+
+        // DATA-ACK timeout timers
+        if (n && strcmp(n, "DATA-ACK-TIMEOUT") == 0) {
+            handleDataAckTimeout(msg);
+            return;
+        }
         handleSelfMessage(msg);
     } else {
         handleMessageFromLowerLayer(msg);
@@ -1161,12 +1185,12 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
     bool sendRouting = false;
     bool sendAodv = false;
 
-        // Check if there are data packets to send, and if it is time to send them
+        // Check if there are data packets to send (or retransmit), and if it is time to send them
         // TODO: Not using dataPacketsDue ???
-        if ( LoRaPacketsToSend.size() > 0 && simTime() >= nextDataPacketTransmissionTime ) {
+        if ( (LoRaPacketsToSend.size() > 0 || !aodvDataRetransmitQueue.empty()) && simTime() >= nextDataPacketTransmissionTime ) {
             sendData = true;
-            EV << "AODV_DEBUG: Data ready to send at node " << nodeId << ", simTime=" << simTime() << ", nextDataTime=" << nextDataPacketTransmissionTime << ", queueSize=" << LoRaPacketsToSend.size() << endl;
-        } else if (LoRaPacketsToSend.size() > 0) {
+            EV << "AODV_DEBUG: Data ready to send at node " << nodeId << ", simTime=" << simTime() << ", nextDataTime=" << nextDataPacketTransmissionTime << ", queueSize=" << LoRaPacketsToSend.size() << ", retransmitQueue=" << aodvDataRetransmitQueue.size() << endl;
+        } else if (LoRaPacketsToSend.size() > 0 || !aodvDataRetransmitQueue.empty()) {
             EV << "AODV_DEBUG: Data waiting at node " << nodeId << ", simTime=" << simTime() << ", nextDataTime=" << nextDataPacketTransmissionTime << " (blocked until " << (nextDataPacketTransmissionTime - simTime()) << "s)" << endl;
         }
 
@@ -1269,11 +1293,10 @@ void LoRaNodeApp::handleSelfMessage(cMessage *msg) {
             }
         }
 
-        // We've sent a packet (routing, data or forward). Now reschedule a selfMessage if needed.
-        if ( LoRaPacketsToSend.size() > 0 )
-            dataPacketsDue = true;
-        if ( LoRaPacketsToForward.size() > 0 )
-            forwardPacketsDue = false;
+        // We've sent a packet (routing, data, forward, or AODV). Now reschedule a selfMessage if needed.
+        // NOTE: retransmit queue must also keep the scheduler alive even when LoRaPacketsToSend is empty.
+        dataPacketsDue = (LoRaPacketsToSend.size() > 0 || !aodvDataRetransmitQueue.empty());
+        forwardPacketsDue = (LoRaPacketsToForward.size() > 0);
         // routingPackets due is handled below.
 
         // Calculate next schedule time, first based on routing packets next transmission time,
@@ -1361,6 +1384,16 @@ void LoRaNodeApp::handleMessageFromLowerLayer(cMessage *msg) {
         }
         if (auto rrep = dynamic_cast<aodv::Rrep*>(inner)) {
             handleAodvPacket(packet); // envelope-aware handler
+            delete msg;
+            return;
+        }
+        if (auto rrepAck = dynamic_cast<aodv::RrepAck*>(inner)) {
+            handleAodvPacket(packet);
+            delete msg;
+            return;
+        }
+        if (auto rerr = dynamic_cast<aodv::Rerr*>(inner)) {
+            handleAodvPacket(packet);
             delete msg;
             return;
         }
@@ -1727,6 +1760,19 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
     LoRaAppPacket *dataPacket = packet->dup();
 
+    // Hop-by-hop DATA-ACK: when I am the intended next hop (unicast via==me), ACK the previous hop.
+    bool sentHopAck = false;
+    if (aodvEnableDataAck && packet->getMsgType() == DATA && packet->getVia() == nodeId) {
+        int prevHop = packet->getLastHop();
+        if (prevHop >= 0 && prevHop != nodeId && prevHop != BROADCAST_ADDRESS) {
+            EV << "DATAACK_DEBUG: node=" << nodeId << " rx DATA-for-forward from prevHop=" << prevHop
+               << " finalDst=" << packet->getDestination() << " ttl=" << packet->getTtl()
+               << " simTime=" << simTime() << endl;
+            sendDataAck(prevHop, packet->getDestination());
+            sentHopAck = true;
+        }
+    }
+
     // AODV PATH ENFORCEMENT: If this node is NOT on the locked reverse path for (source->destination), suppress forwarding.
     // Condition applies only after source has locked a next hop (aodvLockedNextHop at source) and data is unicast (via != BROADCAST)
     // We detect path membership by ensuring we have an installed route back to the source OR we are the locked next hop itself.
@@ -1812,6 +1858,17 @@ void LoRaNodeApp::manageReceivedDataPacketToForward(cMessage *msg) {
     if (newPacketToForward) {
         forwardPacketsDue = true;
 
+        // If we just emitted a hop-by-hop DATA-ACK, give it a tiny head-start before forwarding.
+        if (sentHopAck && aodvEnableDataAck && aodvDataAckForwardDelay > SIMTIME_ZERO) {
+            simtime_t desired = simTime() + aodvDataAckForwardDelay;
+            if (nextForwardPacketTransmissionTime < desired) {
+                EV << "DATAACK_DEBUG: node=" << nodeId << " applying forwardDelay=" << aodvDataAckForwardDelay
+                   << " nextForwardPacketTransmissionTime " << nextForwardPacketTransmissionTime
+                   << " -> " << desired << endl;
+                nextForwardPacketTransmissionTime = desired;
+            }
+        }
+
         if (!selfPacket->isScheduled()) {
             simtime_t nextScheduleTime = simTime() + 10*simTimeResolution;
 
@@ -1837,7 +1894,8 @@ void LoRaNodeApp::manageReceivedPacketForMe(cMessage *msg) {
     switch (packet->getMsgType()) {
     // DATA packet
     case DATA:
-        //manageReceivedDataPacketForMe(packet);
+        // Existing behavior in this codebase forwards even when destination matches.
+        // Keep it to avoid changing semantics beyond adding ACKs.
         std::cout << " forwarding even I am the destination " << packet->getMsgType() << std::endl;
         manageReceivedDataPacketToForward(packet);
         break;
@@ -1871,7 +1929,12 @@ void LoRaNodeApp::manageReceivedAckPacketForMe(cMessage *msg) {
 
     LoRaAppPacket *packet = check_and_cast<LoRaAppPacket *>(msg);
 
-    // Optional: do something with the packet
+    if (aodvEnableDataAck) {
+        // Our DATA-ACK uses msgType=ACK, source=ackSender (next hop), dataInt=final destination
+        int nextHop = packet->getSource();
+        int finalDst = packet->getDataInt();
+        cancelDataAckWait(nextHop, finalDst);
+    }
 }
 
 bool LoRaNodeApp::handleOperationStage(LifecycleOperation *operation, int stage,
@@ -1891,8 +1954,38 @@ simtime_t LoRaNodeApp::sendDataPacket() {
     bool transmit = false;
     simtime_t txDuration = 0;
 
+    // Retransmit queue has absolute priority over generating new/forward packets
+    if (!aodvDataRetransmitQueue.empty()) {
+        bubble("Retransmitting a DATA packet!");
+        localData = false;
+        LoRaAppPacket pkt = aodvDataRetransmitQueue.front();
+        aodvDataRetransmitQueue.erase(aodvDataRetransmitQueue.begin());
+
+        EV << "DATAACK_DEBUG: node=" << nodeId << " TX RETRANSMIT to nextHop=" << pkt.getVia()
+           << " finalDst=" << pkt.getDestination() << " src=" << pkt.getSource()
+           << " ttl=" << pkt.getTtl() << " simTime=" << simTime()
+           << " retransmitQueueRemaining=" << aodvDataRetransmitQueue.size() << endl;
+
+        dataPacket->setMsgType(pkt.getMsgType());
+        dataPacket->setDataInt(pkt.getDataInt());
+        dataPacket->setSource(pkt.getSource());
+        dataPacket->setDestination(pkt.getDestination());
+        dataPacket->setVia(pkt.getVia()); // forced next hop
+        dataPacket->setTtl(pkt.getTtl());
+        dataPacket->getOptions().setAppACKReq(pkt.getOptions().getAppACKReq());
+        dataPacket->setByteLength(pkt.getByteLength());
+        dataPacket->setDepartureTime(pkt.getDepartureTime());
+
+        // Carry over hopTrace (do not extend on retransmit)
+        int old = pkt.getHopTraceArraySize();
+        dataPacket->setHopTraceArraySize(old);
+        for (int i=0;i<old;i++) dataPacket->setHopTrace(i, pkt.getHopTrace(i));
+
+        transmit = true;
+    }
+
     // Send local data packets with a configurable ownDataPriority priority over packets to forward, if there is any
-    if (
+    else if (
             (LoRaPacketsToSend.size() > 0 && bernoulli(ownDataPriority))
             || (LoRaPacketsToSend.size() > 0 && LoRaPacketsToForward.size() == 0)) {
 
@@ -2027,9 +2120,11 @@ simtime_t LoRaNodeApp::sendDataPacket() {
 
         int routeIndex = getBestRouteIndexTo(dataPacket->getDestination());
 
-        // If table-based routing and no route exists, trigger AODV discovery and buffer this DATA
+        // If table-based routing and no route exists, trigger AODV discovery and buffer this DATA.
+        // If via is already explicitly forced (e.g., retransmission to the same next hop), allow sending.
         bool tableBased = (routingMetric == HOP_COUNT_SINGLE_SF || routingMetric == RSSI_SUM_SINGLE_SF || routingMetric == RSSI_PROD_SINGLE_SF || routingMetric == ETX_SINGLE_SF || routingMetric == TIME_ON_AIR_HC_CAD_SF || routingMetric == TIME_ON_AIR_SF_CAD_SF);
-        if (tableBased && routeIndex < 0) {
+        bool placeholderVia = (dataPacket->getVia() == BROADCAST_ADDRESS || dataPacket->getVia() == dataPacket->getSource());
+        if (tableBased && routeIndex < 0 && placeholderVia) {
             EV << "AODV_DEBUG: No route to dest " << dataPacket->getDestination() << " at node " << nodeId << ", buffering data at simTime=" << simTime() << endl;
             maybeStartDiscoveryFor(dataPacket->getDestination());
             aodvBufferedData[dataPacket->getDestination()].push_back(*dataPacket);
@@ -2070,8 +2165,9 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             case RSSI_PROD_SINGLE_SF:
             case ETX_SINGLE_SF:
                 if ( routeIndex >= 0 ) {
-                    // Only set via if not already forced by lock
-                    if (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS) {
+                    // Preserve an explicitly forced next hop (e.g., retransmit). Only override placeholders.
+                    bool placeholderVia = (dataPacket->getVia() == BROADCAST_ADDRESS || dataPacket->getVia() == dataPacket->getSource());
+                    if (placeholderVia && (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS)) {
                         dataPacket->setVia(singleMetricRoutingTable[routeIndex].via);
                     }
                 }
@@ -2086,7 +2182,8 @@ simtime_t LoRaNodeApp::sendDataPacket() {
             case TIME_ON_AIR_HC_CAD_SF:
             case TIME_ON_AIR_SF_CAD_SF:
                 if ( routeIndex >= 0 ) {
-                    if (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS) {
+                    bool placeholderVia = (dataPacket->getVia() == BROADCAST_ADDRESS || dataPacket->getVia() == dataPacket->getSource());
+                    if (placeholderVia && (!aodvLockedNextHop.count(dataPacket->getDestination()) || dataPacket->getVia() == BROADCAST_ADDRESS)) {
                         dataPacket->setVia(dualMetricRoutingTable[routeIndex].via);
                     }
                     cInfo->setLoRaSF(dualMetricRoutingTable[routeIndex].sf);
@@ -2099,6 +2196,21 @@ simtime_t LoRaNodeApp::sendDataPacket() {
                         broadcastForwardedPackets++;
                 }
                 break;
+        }
+
+        // Track previous hop for hop-by-hop ACK generation
+        dataPacket->setLastHop(nodeId);
+
+        // Start DATA-ACK wait for unicast DATA frames
+        if (aodvEnableDataAck && dataPacket->getMsgType() == DATA && dataPacket->getVia() != BROADCAST_ADDRESS) {
+            // Copy *before* adding controlInfo (avoid copying controlInfo pointers)
+            int nh = dataPacket->getVia();
+            int fd = dataPacket->getDestination();
+            std::string key = makeDataAckKey(nh, fd);
+            if (aodvPendingDataAcks.find(key) == aodvPendingDataAcks.end()) {
+                LoRaAppPacket copyForAck = *dataPacket;
+                startDataAckWait(copyForAck, nh);
+            }
         }
 
         dataPacket->setControlInfo(cInfo);
@@ -2143,6 +2255,191 @@ simtime_t LoRaNodeApp::sendDataPacket() {
     return txDuration;
 }
 
+//=============================================================================
+// Hop-by-hop DATA-ACK + basic RERR generation/forwarding
+//=============================================================================
+
+std::string LoRaNodeApp::makeDataAckKey(int nextHop, int finalDst) const {
+    return std::to_string(nextHop) + "_" + std::to_string(finalDst);
+}
+
+void LoRaNodeApp::sendDataAck(int toNode, int finalDst) {
+    if (!aodvEnableDataAck) return;
+    if (toNode < 0 || toNode == BROADCAST_ADDRESS) return;
+
+    LoRaAppPacket ackEnv("DATA-ACK");
+    ackEnv.setMsgType(ACK);
+    ackEnv.setSource(nodeId);
+    ackEnv.setDestination(toNode);
+    ackEnv.setVia(toNode);      // one-hop unicast
+    ackEnv.setLastHop(nodeId);
+    ackEnv.setTtl(1);
+    ackEnv.setDataInt(finalDst); // carry final destination so sender can match pending wait
+    ackEnv.setByteLength(12);
+    ackEnv.setDepartureTime(simTime());
+
+    // Send with AODV control priority (before further DATA)
+    aodvPacketsToSend.push_back(ackEnv);
+    aodvPacketsDue = true;
+    nextAodvPacketTransmissionTime = simTime();
+    EV << "DATAACK_DEBUG: node=" << nodeId << " enqueue DATA-ACK to=" << toNode
+       << " finalDst=" << finalDst << " simTime=" << simTime()
+       << " aodvQueue=" << aodvPacketsToSend.size() << endl;
+    scheduleSelfAt(simTime());
+}
+
+void LoRaNodeApp::startDataAckWait(const LoRaAppPacket& sentData, int nextHop) {
+    if (!aodvEnableDataAck) return;
+    if (nextHop < 0 || nextHop == BROADCAST_ADDRESS) return;
+    int finalDst = sentData.getDestination();
+    std::string key = makeDataAckKey(nextHop, finalDst);
+
+    // Replace any existing pending wait for the same (nextHop, finalDst)
+    cancelDataAckWait(nextHop, finalDst);
+
+    PendingDataAck pd;
+    pd.nextHop = nextHop;
+    pd.finalDst = finalDst;
+    pd.retryCount = 0;
+    pd.dataCopy = sentData;
+    pd.dataCopy.setVia(nextHop); // ensure forced next hop
+    pd.timer = new cMessage("DATA-ACK-TIMEOUT");
+    scheduleAt(simTime() + aodvDataAckTimeout, pd.timer);
+
+    aodvPendingDataAcks[key] = pd;
+
+    EV << "DATAACK_DEBUG: node=" << nodeId << " startWait key=" << key
+       << " timeout=" << aodvDataAckTimeout << " maxRetries=" << aodvDataAckMaxRetries
+       << " simTime=" << simTime() << endl;
+}
+
+void LoRaNodeApp::cancelDataAckWait(int nextHop, int finalDst) {
+    std::string key = makeDataAckKey(nextHop, finalDst);
+    auto it = aodvPendingDataAcks.find(key);
+    if (it == aodvPendingDataAcks.end()) {
+        EV << "DATAACK_DEBUG: node=" << nodeId << " cancelWait key=" << key
+           << " (not found) simTime=" << simTime() << endl;
+        return;
+    }
+
+    if (it->second.timer) {
+        if (it->second.timer->isScheduled()) cancelEvent(it->second.timer);
+        delete it->second.timer;
+        it->second.timer = nullptr;
+    }
+    aodvPendingDataAcks.erase(it);
+    EV << "DATAACK_DEBUG: node=" << nodeId << " cancelWait key=" << key
+       << " simTime=" << simTime() << endl;
+}
+
+void LoRaNodeApp::handleDataAckTimeout(cMessage *msg) {
+    // Find which pending entry this timer belongs to
+    std::string foundKey;
+    for (auto &kv : aodvPendingDataAcks) {
+        if (kv.second.timer == msg) {
+            foundKey = kv.first;
+            break;
+        }
+    }
+    if (foundKey.empty()) {
+        EV << "DATAACK_DEBUG: node=" << nodeId << " timeout fired but no pending entry found; simTime=" << simTime() << endl;
+        delete msg;
+        return;
+    }
+
+    auto it = aodvPendingDataAcks.find(foundKey);
+    if (it == aodvPendingDataAcks.end()) {
+        delete msg;
+        return;
+    }
+
+    PendingDataAck &pd = it->second;
+    pd.retryCount++;
+
+     EV << "DATAACK_DEBUG: node=" << nodeId << " TIMEOUT key=" << foundKey
+         << " nextHop=" << pd.nextHop << " finalDst=" << pd.finalDst
+         << " retry=" << pd.retryCount << "/" << aodvDataAckMaxRetries
+         << " simTime=" << simTime() << endl;
+
+    if (pd.retryCount <= aodvDataAckMaxRetries) {
+        // Retransmit the same DATA to the same next hop
+        aodvDataRetransmitQueue.push_back(pd.dataCopy);
+        nextDataPacketTransmissionTime = simTime();
+        EV << "DATAACK_DEBUG: node=" << nodeId << " enqueue RETRANSMIT nextHop=" << pd.nextHop
+           << " finalDst=" << pd.finalDst << " queueSize=" << aodvDataRetransmitQueue.size()
+           << " nextDataTime=" << nextDataPacketTransmissionTime << endl;
+        scheduleSelfAt(simTime());
+
+        // Reschedule the same timer message
+        scheduleAt(simTime() + aodvDataAckTimeout, msg);
+          EV << "DATAACK_DEBUG: node=" << nodeId << " rescheduled TIMEOUT in " << aodvDataAckTimeout
+              << " (retry " << pd.retryCount << ")" << endl;
+        return;
+    }
+
+    // Retries exhausted: invalidate the route entry for finalDst and send a basic RERR toward original source
+    LoRaAppPacket failedData = pd.dataCopy;
+    int brokenNextHop = pd.nextHop;
+
+    // Cleanup pending state (delete timer)
+    pd.timer = nullptr;
+    aodvPendingDataAcks.erase(it);
+    delete msg;
+
+    // Remove any route to final destination that goes via brokenNextHop
+    for (size_t i = 0; i < singleMetricRoutingTable.size(); ) {
+        if (singleMetricRoutingTable[i].id == failedData.getDestination() && singleMetricRoutingTable[i].via == brokenNextHop) {
+            singleMetricRoutingTable.erase(singleMetricRoutingTable.begin() + i);
+        } else {
+            ++i;
+        }
+    }
+    if (aodvLockedNextHop.count(failedData.getDestination()) && aodvLockedNextHop[failedData.getDestination()] == brokenNextHop) {
+        aodvLockedNextHop.erase(failedData.getDestination());
+        aodvLockedNextHopExpiry.erase(failedData.getDestination());
+    }
+
+    EV << "DATAACK_DEBUG: node=" << nodeId << " retries exhausted; generating RERR unreachable="
+       << failedData.getDestination() << " brokenNextHop=" << brokenNextHop
+       << " originSrc=" << failedData.getSource() << " simTime=" << simTime() << endl;
+    sendRerrTowardSource(failedData, brokenNextHop);
+}
+
+void LoRaNodeApp::sendRerrTowardSource(const LoRaAppPacket& failedData, int brokenNextHop) {
+    // Generate a minimal RERR and send it toward the original source (no precursor list yet)
+    aodv::Rerr *innerRerr = new aodv::Rerr("RERR");
+    innerRerr->setUnreachableDst(failedData.getDestination());
+    innerRerr->setUnreachableSeq(0);
+    innerRerr->setBrokenNextHop(brokenNextHop);
+
+    int originSrc = failedData.getSource();
+
+    LoRaAppPacket rerrEnv("AODV-RERR");
+    rerrEnv.setMsgType(ROUTING);
+    rerrEnv.setSource(nodeId);
+    rerrEnv.setDestination(originSrc);
+    rerrEnv.setTtl(std::max(1, aodvRerrTtl));
+    rerrEnv.setLastHop(nodeId);
+
+    int idx = getBestRouteIndexTo(originSrc);
+    if (idx >= 0 && idx < (int)singleMetricRoutingTable.size()) {
+        rerrEnv.setVia(singleMetricRoutingTable[idx].via);
+    } else {
+        rerrEnv.setVia(BROADCAST_ADDRESS);
+    }
+
+    EV << "DATAACK_DEBUG: node=" << nodeId << " sendRERR unreachableDst=" << failedData.getDestination()
+       << " originSrc=" << originSrc << " via=" << rerrEnv.getVia() << " ttl=" << rerrEnv.getTtl()
+       << " simTime=" << simTime() << endl;
+
+    rerrEnv.encapsulate(innerRerr);
+
+    aodvPacketsToSend.push_back(rerrEnv);
+    aodvPacketsDue = true;
+    nextAodvPacketTransmissionTime = simTime();
+    scheduleSelfAt(simTime());
+}
+
 // AODV: wrapper that dispatches RREQ/RREP
 // Helpers for AODV destination sequence comparison (handle wrap if needed)
 static inline bool seqNewer(uint32_t a, uint32_t b) {
@@ -2160,6 +2457,51 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
     // Handle RREP-ACK messages
     if (auto rrepAck = dynamic_cast<aodv::RrepAck*>(inner)) {
         handleRrepAck(msg);
+        return;
+    }
+
+    // Handle RERR messages
+    if (auto rerr = dynamic_cast<aodv::Rerr*>(inner)) {
+        int unreachable = rerr->getUnreachableDst();
+        EV << "AODV: Received RERR at node " << nodeId << " unreachableDst=" << unreachable
+           << " toward originalSrc=" << packet->getDestination() << endl;
+
+        // Invalidate route entry for the unreachable destination
+        for (size_t i = 0; i < singleMetricRoutingTable.size(); ) {
+            if (singleMetricRoutingTable[i].id == unreachable) {
+                singleMetricRoutingTable.erase(singleMetricRoutingTable.begin() + i);
+            } else {
+                ++i;
+            }
+        }
+        if (aodvLockedNextHop.count(unreachable)) {
+            aodvLockedNextHop.erase(unreachable);
+            aodvLockedNextHopExpiry.erase(unreachable);
+        }
+
+        // Forward RERR toward the original source (envelope destination) if not reached yet
+        if (packet->getDestination() != nodeId) {
+            if (packet->getTtl() <= 1) {
+                EV << "AODV: Drop RERR due to TTL at node " << nodeId << endl;
+                return;
+            }
+
+            LoRaAppPacket fwd = *packet; // deep copy envelope + inner
+            fwd.setTtl(packet->getTtl() - 1);
+            fwd.setLastHop(nodeId);
+            int srcId = packet->getDestination();
+            int idx = getBestRouteIndexTo(srcId);
+            if (idx >= 0 && idx < (int)singleMetricRoutingTable.size()) {
+                fwd.setVia(singleMetricRoutingTable[idx].via);
+            } else {
+                fwd.setVia(BROADCAST_ADDRESS);
+            }
+
+            aodvPacketsToSend.push_back(fwd);
+            aodvPacketsDue = true;
+            nextAodvPacketTransmissionTime = simTime();
+            scheduleSelfAt(simTime());
+        }
         return;
     }
     

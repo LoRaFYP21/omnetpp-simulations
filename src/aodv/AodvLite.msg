@@ -31,3 +31,10 @@ packet RrepAck {
 	// Just needs to identify which RREP is being acknowledged
 }
 
+packet Rerr {
+	// Minimal RERR: indicate a destination became unreachable (no precursor list yet)
+	int unreachableDst;
+	int unreachableSeq;
+	int brokenNextHop; // the neighbor considered broken
+}
+

@@ -32,7 +32,7 @@
 #include "LoRaAppPacket_m.h"
 #include "LoRa/LoRaMacControlInfo_m.h"
 
-namespace aodv { class Rreq; class Rrep; class RrepAck; }
+namespace aodv { class Rreq; class Rrep; class RrepAck; class Rerr; }
 
 using namespace omnetpp;
 
@@ -91,6 +91,14 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     void cancelRrepAckTimer(int nextHop, int origSrc, int finalDst);
     bool isNodeBlacklisted(int nodeId);
     void blacklistNode(int nodeId);
+
+    // Hop-by-hop DATA-ACK + link break detection (AODV extension)
+    void sendDataAck(int toNode, int finalDst);
+    void handleDataAckTimeout(cMessage *msg);
+    void startDataAckWait(const LoRaAppPacket& sentData, int nextHop);
+    void cancelDataAckWait(int nextHop, int finalDst);
+    std::string makeDataAckKey(int nextHop, int finalDst) const;
+    void sendRerrTowardSource(const LoRaAppPacket& failedData, int brokenNextHop);
     // Log when an AODV RREQ is processed at any node (destination or intermediate)
     void logRreqAtDestination(const aodv::Rreq* rreq);
     // Unified RREP hop/path logger
@@ -244,6 +252,23 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     
     // Blacklisted nodes (unidirectional link detection)
     std::map<int, simtime_t> aodvBlacklistedNodes;  // nodeId -> blacklist expiry time
+
+    // DATA-ACK configuration and state
+    bool aodvEnableDataAck = false;             // Enable hop-by-hop DATA-ACK (default: false)
+    simtime_t aodvDataAckTimeout;               // Timeout for DATA-ACK wait (default from NED)
+    simtime_t aodvDataAckForwardDelay = SIMTIME_ZERO; // Small delay before forwarding after sending DATA-ACK
+    int aodvDataAckMaxRetries = 2;              // Number of retransmissions (default: 2)
+    int aodvRerrTtl = 20;                       // TTL used for RERR propagation toward source
+
+    struct PendingDataAck {
+        int nextHop = -1;
+        int finalDst = -1;
+        int retryCount = 0;
+        cMessage* timer = nullptr;
+        LoRaAppPacket dataCopy; // copy of DATA packet (with forced via=nextHop)
+    };
+    std::map<std::string, PendingDataAck> aodvPendingDataAcks;  // key = "nextHop_finalDst"
+    std::vector<LoRaAppPacket> aodvDataRetransmitQueue;         // DATA packets to retransmit ASAP
 
         // Failure parameters/state
         bool nodeFailed = false;
