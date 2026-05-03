@@ -229,7 +229,6 @@ class INET_API LoRaNodeApp : public cSimpleModule, public ILifecycle
     // AODV retry backoff and per-destination timers
     simtime_t aodvRreqBackoff;
     int aodvRreqMaxRetries;
-    simtime_t aodvRrepJitter;
     std::map<int,int> aodvRetryCount;           // destinationId -> retries
     std::map<int,cMessage*> aodvRetryTimers;    // destinationId -> timer message
     

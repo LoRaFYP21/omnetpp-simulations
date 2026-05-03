@@ -35,6 +35,11 @@ module LoRaNode
         double initialY @unit(m) = default(0m);
         bool iAmEnd = default(false);
         int cols = default(10);
+
+        int gridCols = default(-1);
+        // gridJitter: random displacement added to grid coordinates (meters)
+        double gridJitter @unit(m) = default(100m);
+
         double maxGatewayDistance = default(320.0);
         double gatewayX = default(320.0);
         double gatewayY = default(320.0);

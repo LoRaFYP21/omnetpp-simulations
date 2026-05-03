@@ -611,8 +611,6 @@ void LoRaNodeApp::initialize(int stage) {
         // AODV retry configuration
         aodvRreqBackoff = par("aodvRreqBackoff");
         aodvRreqMaxRetries = par("aodvRreqMaxRetries");
-        aodvRrepJitter = par("aodvRrepJitter");
-        
         // RREP-ACK configuration (RFC3561) - optional, default disabled
         aodvEnableRrepAck = par("aodvEnableRrepAck").boolValue();
         if (aodvEnableRrepAck) {
@@ -2402,6 +2400,11 @@ void LoRaNodeApp::handleDataAckTimeout(cMessage *msg) {
     EV << "DATAACK_DEBUG: node=" << nodeId << " retries exhausted; generating RERR unreachable="
        << failedData.getDestination() << " brokenNextHop=" << brokenNextHop
        << " originSrc=" << failedData.getSource() << " simTime=" << simTime() << endl;
+    EV_WARN << "RERR_GENERATE node=" << nodeId
+            << " unreachableDst=" << failedData.getDestination()
+            << " brokenNextHop=" << brokenNextHop
+            << " originSrc=" << failedData.getSource()
+            << " simTime=" << simTime() << endl;
     sendRerrTowardSource(failedData, brokenNextHop);
 }
 
@@ -2431,6 +2434,12 @@ void LoRaNodeApp::sendRerrTowardSource(const LoRaAppPacket& failedData, int brok
     EV << "DATAACK_DEBUG: node=" << nodeId << " sendRERR unreachableDst=" << failedData.getDestination()
        << " originSrc=" << originSrc << " via=" << rerrEnv.getVia() << " ttl=" << rerrEnv.getTtl()
        << " simTime=" << simTime() << endl;
+    EV_WARN << "RERR_SEND node=" << nodeId
+            << " unreachableDst=" << failedData.getDestination()
+            << " originSrc=" << originSrc
+            << " via=" << rerrEnv.getVia()
+            << " ttl=" << rerrEnv.getTtl()
+            << " simTime=" << simTime() << endl;
 
     rerrEnv.encapsulate(innerRerr);
 
@@ -2465,6 +2474,12 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         int unreachable = rerr->getUnreachableDst();
         EV << "AODV: Received RERR at node " << nodeId << " unreachableDst=" << unreachable
            << " toward originalSrc=" << packet->getDestination() << endl;
+        EV_WARN << "RERR_RECEIVE node=" << nodeId
+                << " unreachableDst=" << unreachable
+                << " towardOriginalSrc=" << packet->getDestination()
+                << " fromLastHop=" << packet->getLastHop()
+                << " ttl=" << packet->getTtl()
+                << " simTime=" << simTime() << endl;
 
         // Invalidate route entry for the unreachable destination
         for (size_t i = 0; i < singleMetricRoutingTable.size(); ) {
@@ -2483,6 +2498,10 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
         if (packet->getDestination() != nodeId) {
             if (packet->getTtl() <= 1) {
                 EV << "AODV: Drop RERR due to TTL at node " << nodeId << endl;
+                EV_WARN << "RERR_DROP_TTL node=" << nodeId
+                        << " unreachableDst=" << unreachable
+                        << " towardOriginalSrc=" << packet->getDestination()
+                        << " simTime=" << simTime() << endl;
                 return;
             }
 
@@ -2496,6 +2515,13 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             } else {
                 fwd.setVia(BROADCAST_ADDRESS);
             }
+
+            EV_WARN << "RERR_FORWARD node=" << nodeId
+                    << " unreachableDst=" << unreachable
+                    << " towardOriginalSrc=" << packet->getDestination()
+                    << " via=" << fwd.getVia()
+                    << " ttl=" << fwd.getTtl()
+                    << " simTime=" << simTime() << endl;
 
             aodvPacketsToSend.push_back(fwd);
             aodvPacketsDue = true;
@@ -2624,8 +2650,9 @@ void LoRaNodeApp::handleAodvPacket(cMessage *msg) {
             }
             
             aodvPacketsToSend.push_back(rrepEnv);
-            // Apply RREP jitter: destination delays reply to let RREQ flood settle
-            aodvPacketsDue = true; nextAodvPacketTransmissionTime = simTime() + aodvRrepJitter;
+            // Sample the volatile jitter parameter per RREP so each reply gets its own delay.
+            aodvPacketsDue = true;
+            nextAodvPacketTransmissionTime = simTime() + par("aodvRrepJitter").doubleValue();
         } else {
             EV << "DEBUG_RREQ_V2: *** NOT the destination *** Will forward RREQ as intermediate node" << endl;
             // Intermediate: DO NOT send RREP; only destination replies
