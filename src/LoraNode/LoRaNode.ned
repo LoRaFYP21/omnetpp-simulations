@@ -24,6 +24,7 @@ import loranetwork.LoRaApp.LoRaNodeApp;
 module LoRaNode
 {
     parameters:
+
         int numberOfNodes = default(1);       // Required by LoRaNodeApp
         int numberOfEndNodes = default(1);    // Required by LoRaNodeApp
         string deploymentType = default("");
@@ -32,6 +33,7 @@ module LoRaNode
         int gridCols = default(-1);
         // gridJitter: random displacement added to grid coordinates (meters)
         double gridJitter @unit(m) = default(100m);
+        string deploymentType = default("");
         double minX @unit(m) = default(0m);
         double maxX @unit(m) = default(1000m);
         double sepX @unit(m) = default(1000m);
@@ -42,6 +44,11 @@ module LoRaNode
         double initialY @unit(m) = default(0m);
         bool iAmEnd = default(false);
         int cols = default(10);
+
+        int gridCols = default(-1);
+        // gridJitter: random displacement added to grid coordinates (meters)
+        //double gridJitter @unit(m) = default(100m);
+
         double maxGatewayDistance = default(320.0);
         double gatewayX = default(320.0);
         double gatewayY = default(320.0);
